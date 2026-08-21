@@ -8,7 +8,7 @@ import sys
 
 import binaryninja as bn
 
-from delphi.tools import generate
+from tools import generate
 
 if __name__ == "__main__":
     bn.disable_default_log()

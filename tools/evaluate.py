@@ -13,7 +13,10 @@ an address when it lands inside the mapped image -- so the same function can
 hash differently in a small executable than in a large one, and a library
 implicitly targets a size range.
 
-    python3 evaluate.py <corpus_dir> [limit]
+    python3 tools/evaluate.py <corpus_dir> [limit]
+
+Run from the repository root, or with the repository's parent directory on
+`sys.path`: this one *does* want the plugin's decoder, unlike the build tools.
 """
 
 import os
@@ -22,12 +25,14 @@ import sys
 import binaryninja as bn
 from binaryninja import warp
 
-sys.path.insert(0, os.path.expanduser(
-    "~/Library/Application Support/Binary Ninja/plugins"))
+# The repository's parent, so `delphi.rtti` imports the decoder from this
+# checkout rather than from whatever happens to be installed.
+sys.path.insert(0, os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))))
 
 
 def evaluate(path):
-    from delphi_rtti import apply as A
+    from delphi.rtti import apply as A
     out = {"file": os.path.basename(path), "size": os.path.getsize(path)}
     bv = bn.load(path, update_analysis=True,
                  options={"analysis.debugInfo.internal": False})

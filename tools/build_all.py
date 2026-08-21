@@ -23,7 +23,6 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)             # the plugin package
-PARENT = os.path.dirname(ROOT)           # what `import delphi` needs on sys.path
 
 # Scratch Binary Ninja user directory. Set before binaryninja is imported so a
 # batch run cannot write to the real one -- Settings() writes are global.
@@ -107,7 +106,7 @@ def main(outdir, workdir, only=None):
     cache = os.path.join(workdir, "kb")
     os.makedirs(cache, exist_ok=True)
 
-    from delphi.tools import generate
+    from tools import generate
 
     results = []
     started = time.time()
@@ -134,7 +133,11 @@ def main(outdir, workdir, only=None):
 
 
 if __name__ == "__main__":
-    sys.path.insert(0, PARENT)
+    # ROOT, not its parent: importing `delphi` would execute the plugin's
+    # __init__ and register the recovery workflow inside this process, which
+    # would then run against the staged signature image and remove functions
+    # from it. `tools` has no such side effects.
+    sys.path.insert(0, ROOT)
     import binaryninja
     binaryninja.disable_default_log()
     main(sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "signatures"),
