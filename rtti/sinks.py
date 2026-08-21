@@ -17,7 +17,7 @@ import binaryninja as bn
 from binaryninja import (FunctionParameter, NamedTypeReferenceClass, Symbol,
                          SymbolType, Type)
 
-TAG = "delphi"
+TAG = "delphinja"
 
 
 class Sink(object):
@@ -121,7 +121,7 @@ class AutoSink(Sink):
         self.pending_self = []
 
     def add_type(self, name, ty):
-        self.bv.define_type(Type.generate_auto_type_id("delphi_rtti", name),
+        self.bv.define_type(Type.generate_auto_type_id("delphinja", name),
                             name, ty)
 
     def add_data_var(self, addr, ty, name):

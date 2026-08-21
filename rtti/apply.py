@@ -12,7 +12,7 @@ from . import messages
 from . import parser as P
 from . import sinks
 
-TAG = "delphi"
+TAG = "delphinja"
 _BAD_CHARS = re.compile(r"[^A-Za-z0-9_.$]")
 
 

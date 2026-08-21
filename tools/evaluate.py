@@ -25,14 +25,14 @@ import sys
 import binaryninja as bn
 from binaryninja import warp
 
-# The repository's parent, so `delphi.rtti` imports the decoder from this
+# The repository's parent, so `delphinja.rtti` imports the decoder from this
 # checkout rather than from whatever happens to be installed.
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
 
 
 def evaluate(path):
-    from delphi.rtti import apply as A
+    from delphinja.rtti import apply as A
     out = {"file": os.path.basename(path), "size": os.path.getsize(path)}
     bv = bn.load(path, update_analysis=True,
                  options={"analysis.debugInfo.internal": False})

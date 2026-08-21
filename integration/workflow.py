@@ -32,8 +32,8 @@ from ..rtti import apply as A
 from ..rtti import parser as P
 from ..rtti import sinks
 
-ACTIVITY = "analysis.plugins.delphi"
-CLEANUP = "analysis.plugins.delphiCleanup"
+ACTIVITY = "analysis.plugins.delphinja"
+CLEANUP = "analysis.plugins.delphinjaCleanup"
 TAG = A.TAG
 
 # How far into a code section to look for the first VMT before giving up.
@@ -62,7 +62,7 @@ def probe(bv):
 def _state(bv):
     """Per-view scratch. Activities are shared between workflows and must be
     re-entrant, so this cannot be a module-level global."""
-    return bv.session_data.setdefault("delphi_rtti", {})
+    return bv.session_data.setdefault("delphinja", {})
 
 
 def _eligible(activity, context):

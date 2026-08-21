@@ -194,7 +194,7 @@ def cmd_export(bv):
 
 
 _SETTINGS = bn.Settings()
-_SETTINGS.register_group("delphi", "Delphi")
+_SETTINGS.register_group("delphinja", "Delphinja")
 for _key, _title, _desc in (
         ("demangler", "Borland Demangler",
          "Demangle Borland/Delphi symbol names."),
@@ -204,25 +204,25 @@ for _key, _title, _desc in (
          "Register the Delphi runtime signature libraries that ship with "
          "this plugin. Turn off to use only the signatures installed in the "
          "user and install signature directories.")):
-    _SETTINGS.register_setting("delphi.%s" % _key, json.dumps({
+    _SETTINGS.register_setting("delphinja.%s" % _key, json.dumps({
         "title": _title, "type": "boolean", "default": True,
         "description": _desc}))
 
 # Registered separately and each behind its own switch, so a performance or
 # correctness problem can be attributed to one or the other without editing
 # code or moving files.
-if _SETTINGS.get_bool("delphi.demangler"):
+if _SETTINGS.get_bool("delphinja.demangler"):
     D.register()
 
 # Registered into WARP's container cache rather than copied into the user's
 # signature directory, so the libraries travel with the plugin.
-if _SETTINGS.get_bool("delphi.signatures"):
+if _SETTINGS.get_bool("delphinja.signatures"):
     SIG.register(TAG)
 # One decoder, two delivery mechanisms. Both drive the same parser, scanner
 # and type construction through sinks; they differ only in where the results
 # are written and when. Switchable at runtime so the two can be compared on
 # the same binary without swapping builds.
-_SETTINGS.register_setting("delphi.mechanism", json.dumps({
+_SETTINGS.register_setting("delphinja.mechanism", json.dumps({
     "title": "Delphi Metadata Recovery",
     "type": "string",
     "default": "workflow",
@@ -235,7 +235,7 @@ _SETTINGS.register_setting("delphi.mechanism", json.dumps({
     ],
     "description": "How recovered Delphi metadata reaches the analysis."}))
 
-_MECHANISM = _SETTINGS.get_string("delphi.mechanism")
+_MECHANISM = _SETTINGS.get_string("delphinja.mechanism")
 if _MECHANISM == "workflow":
     WF.register()
 elif _MECHANISM == "debugInfo":
@@ -244,7 +244,7 @@ elif _MECHANISM == "debugInfo":
 # A plugin command's is_valid callback is invoked by the UI whenever menus are
 # built, so six registered commands means six Python calls -- each taking the
 # GIL -- on a path the UI walks often. Gated so that cost can be isolated.
-if _SETTINGS.get_bool("delphi.commands"):
+if _SETTINGS.get_bool("delphinja.commands"):
     PluginCommand.register(
         "Delphi\\Report metadata regions",
         "Scan for Delphi RTTI/VMT metadata and show what was found",

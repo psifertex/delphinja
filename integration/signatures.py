@@ -18,7 +18,7 @@ import os
 
 import binaryninja as bn
 
-CONTAINER = "Delphi Plugin Signatures"
+CONTAINER = "Delphinja Signatures"
 
 _DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                     "signatures")
@@ -32,7 +32,7 @@ def bundled():
                   if f.endswith(".warp"))
 
 
-def register(tag="Delphi"):
+def register(tag="Delphinja"):
     """Add the bundled libraries to WARP's container cache.
 
     Returns the number of libraries registered. Failure here must not stop the

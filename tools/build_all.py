@@ -133,7 +133,7 @@ def main(outdir, workdir, only=None):
 
 
 if __name__ == "__main__":
-    # ROOT, not its parent: importing `delphi` would execute the plugin's
+    # ROOT, not its parent: importing `delphinja` would execute the plugin's
     # __init__ and register the recovery workflow inside this process, which
     # would then run against the staged signature image and remove functions
     # from it. `tools` has no such side effects.
