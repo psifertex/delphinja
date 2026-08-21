@@ -1,0 +1,17 @@
+# Test binaries, fetched not authored -- 250 MB and not ours to redistribute
+corpus/
+corpus-fpc/
+
+# Build scratch and analysis databases
+work/
+out/
+*.bndb
+*.bin
+
+__pycache__/
+*.pyc
+
+# Signature libraries are generated, but the ones under signatures/ are the
+# plugin's shipped payload and belong in the repository.
+*.warp
+!signatures/*.warp
