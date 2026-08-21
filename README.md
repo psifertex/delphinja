@@ -146,6 +146,32 @@ the binary. In the test binary 1205 code addresses are reachable from RTTI and
 routines like `Classes.ReadError` requires signature matching (IDA uses FLIRT
 for exactly this), not deeper parsing.
 
+## Measured accuracy
+
+Against the 96-binary corpus, with all fifteen libraries registered and the
+binary's own RTTI as independent ground truth:
+
+    91,518 functions matched
+    precision on overlapping names: 2904/2919 = 99.5%
+
+The fifteen remaining disagreements are all cross-version VCL confusions --
+`Grids::TCustomDrawGrid::TopLeftChanged` matched where the binary's metadata
+says `TJvCustomRichEdit` -- which is what similar VCL code across versions
+costs. Full run in `tools/eval-96-all-versions.log`.
+
+Two caveats worth knowing before reading that number:
+
+- The same measurement reported 59% before dynamic method tables were checked
+  for validity. Nearly all of those "disagreements" were bad ground truth
+  rather than bad signatures: a misread table slot produced 205,090 bogus
+  claims on one binary alone. A precision figure is only as good as the truth
+  it is measured against.
+- Registering all fifteen libraries at once is not free. On a 30-file
+  comparison, loading only the matching version matched *more* functions on 11
+  of 30 binaries than loading all fifteen -- several libraries claiming the
+  same GUID makes the matcher ambiguous and it declines the match. Selecting a
+  library by detected version would recover those.
+
 ## Accuracy notes
 
 `messages.py` maps dynamic-method ids to `WM_*` / `CM_*` / `CN_*` names. The

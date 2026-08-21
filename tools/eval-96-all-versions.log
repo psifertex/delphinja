@@ -1,0 +1,105 @@
+file                                   size   funcs matched   rate overlap  agree
+cdrtfe-1.5.9.1.exe                  7455816     581      73    13%      -      -
+docto.exe                           3382272   22411    1450     6%      0      0
+dlngc.exe                            128512    1191     344    29%      1      1
+dlngc_1.exe                          122880    1165     404    35%      1      1
+drgunpack5.exe                      2768896   12554    3545    28%    478    473
+      DISAGREE 0x45d9a4 rtti=TToolBar warp=ActnMan::TCustomActionBar::CMEnabledchanged
+      DISAGREE 0x4aea04 rtti=TJvCustomRichEdit warp=Grids::TCustomDrawGrid::TopLeftChanged
+      DISAGREE 0x509640 rtti=TfrmSelectLanguage.cmdOkClick warp=ActnMenus::TCustomActionPopupMenu::CloseMenu
+      DISAGREE 0x4ac738 rtti=TJvCustomRichEdit warp=ComCtrls::TCustomRichEdit::CMColorChanged
+      DISAGREE 0x4ac7c8 rtti=TJvCustomRichEdit warp=MXGRID::TCustomDecisionGrid::TopLeftChanged
+drgunpack5_1.exe                    2836480   12868    3593    28%    485    480
+      DISAGREE 0x4b4860 rtti=TJvCustomRichEdit warp=Vcl.Grids::TCustomGrid::FixedCellClick
+      DISAGREE 0x4b4a28 rtti=TJvCustomRichEdit warp=MXGRID::TCustomDecisionGrid::TopLeftChanged
+      DISAGREE 0x4b2ac0 rtti=TJvCustomRichEdit warp=ComCtrls::TCustomRichEdit::CMColorChanged
+      DISAGREE 0x51ac04 rtti=TfrmSelectLanguage.cmdOkClick warp=ActnMenus::TCustomActionPopupMenu::CloseMenu
+      DISAGREE 0x45ee6c rtti=TToolBar warp=ActnMan::TCustomActionBar::CMEnabledchanged
+duhtcomp.exe                         127488    1220     342    28%      1      1
+duhtcomp_1.exe                       125952    1181     405    34%      1      1
+dup520cinthia-setup.exe             2251908     547      73    13%      -      -
+duppi.exe                            798720    6368    2549    40%    312    312
+duppi_1.exe                          906240    7374    2707    37%    326    323
+      DISAGREE 0x4a2124 rtti=TJvCustomRichEdit warp=MXGRID::TCustomDecisionGrid::TopLeftChanged
+      DISAGREE 0x4a01bc rtti=TJvCustomRichEdit warp=ComCtrls::TCustomRichEdit::CMColorChanged
+      DISAGREE 0x4a1f5c rtti=TJvCustomRichEdit warp=Vcl.Grids::TCustomGrid::FixedCellClick
+duppiinstall.exe                      43520     415      99    24%      0      0
+AriaNg.exe                          3062632    9247    2894    31%      0      0
+AriaNg.exe                          2884608    7863    2828    36%      0      0
+AutoGetItVCL32.exe                  4557312   22122     918     4%      0      0
+aViewer2.0.1.0.exe                  2905654     781     186    24%      0      0
+BatteryMode32.exe                   5043200   18064     774     4%      0      0
+BatteryModeInstaller32.exe          2686735     781     186    24%      0      0
+BinaryVisualizer.exe                3212800   24442    2070     8%      0      0
+CART.exe                             631296    5422    2432    45%    367    366
+      DISAGREE 0x471c64 rtti=TCustomStatusBar warp=ComCtrls::TToolBar::CMSysFontChanged
+CodeSnip-p.exe                      5187584   34674    5851    17%      0      0
+DbAwareLabeledComponents_Setup.exe  2593688    3949     249     6%      0      0
+Updater.exe                         1372200    8311    2403    29%    251    250
+      DISAGREE 0x4ddd2c rtti=TfmrUpdate.SpeedButton1Click warp=SvrMainForm::TWebAppDbgMainForm::ExitActionExecute
+Setup_DITE.exe                      4294168     781     186    24%      0      0
+CodeCoverage.exe                    2494976   13845     655     5%      0      0
+Launcher.exe                        1349120    6106    2671    44%    365    365
+DelphiGoogleMaps_Setup.exe          3456608    3959     245     6%      0      0
+Deskprompter-Setup-1.0.0.exe        4386550    4107     237     6%      0      0
+dup570beta-setup.exe                3187802     567      73    13%      -      -
+DX.HttpDiag-Win32.exe               1701376    9653     396     4%      0      0
+EWSS_Tool_PREL_0.2.24.3_Git.exe     2608640   14515     767     5%      0      0
+gpprof.exe                          6212608   30658    1100     4%      0      0
+hfs.exe                             5057024   32521    1778     5%      0      0
+IconFontsImageList_Setup.exe        6087120    3960     246     6%      0      0
+ImageWriterSvc.exe                  2325504   13793     622     5%      0      0
+InstantObjects_Setup.exe            4386568    3948     249     6%      0      0
+FastNetConfig.exe                   1208832    6638    2791    42%      0      0
+kcptun_gclient.exe                  2485248   16406    1706    10%      0      0
+keynote.exe                         5790576   24936     829     3%      0      0
+LibreCrypt.exe                      3888640   22309    5790    26%      0      0
+Linkbar.exe                         2563072   17152    1069     6%      0      0
+Magicmida.exe                       2569728   12012     522     4%      0      0
+MiniPing.exe                         142848     913     227    25%      0      0
+NotesMan.exe                        5676544   41929    2026     5%      0      0
+PasClaw-0.1.3-x86-setup.exe         4474696    4108     241     6%      0      0
+Pet.exe                               62384     510      38     7%      0      0
+AdvancedShutdown_Setup.exe           771301    1513      73     5%      0      0
+ThundaxObjectDemo.v2.0.exe          1724928    7827    2647    34%      0      0
+TimeCalculator.exe                  2477056   19273    1213     6%      0      0
+TestActiveDirectory.exe             2443264   17450    2033    12%      0      0
+WallRnd.exe                         3939328   21957    1417     6%      0      0
+WHFE_1.0.0.1.exe                    2491392   13873     691     5%      0      0
+WinXCorners.exe                     1466368    6272    2533    40%    322    322
+xxmCGI.exe                            92160    1052     303    29%      1      1
+xxmConv.exe                          196608    1895     461    24%      1      1
+hfs.exe                             5061120   32466    1788     6%      0      0
+HxD32.exe                           4703232   24489    5066    21%      0      0
+HxDSetup.exe                        3444957     783     186    24%      0      0
+Compil32.exe                         510976    4949    1408    28%      0      0
+Compil32_2.exe                       497664    4793    1403    29%      0      0
+Compil32_3.exe                       564736    5326    1423    27%      0      0
+Compil32_4.exe                       577024    5435    1424    26%      0      0
+Compil32_5.exe                       654336    5535    1421    26%      0      0
+ISCC.exe                              34304     351      71    20%      -      -
+ISCC_1.exe                            33792     354      71    20%      -      -
+ISCC_2.exe                            34304     354      72    20%      -      -
+ISCC_3.exe                            34304     349      73    21%      -      -
+ISCC_4.exe                            57856     384      67    17%      -      -
+ISCC_5.exe                            57856     388      66    17%      -      -
+ISCC_6.exe                            59392     395      66    17%      -      -
+compil32_1.exe                       245248    2801    1263    45%      -      -
+dopatch.exe                           29696       6       0     0%      -      -
+isetup-1.3.26.exe                    765774     477      76    16%      -      -
+isetup-2.0.19.exe                   1125846     484      76    16%      -      -
+isetup-3.0.7.exe                     943005     487      77    16%      -      -
+isetup-4.0.11.exe                   1193101     517      80    15%      -      -
+disasm.exe                           212992    1754     551    31%      1      1
+innounp.exe                          665088    5372     360     7%      1      1
+innounp_1.exe                        158720    1676     398    24%      1      1
+innounp_2.exe                        228352    1993     406    20%      1      1
+innounp_3.exe                        338944    2723     354    13%      1      1
+innounp_4.exe                        423936    3209     354    11%      1      1
+innounp_5.exe                        564736    4498     420     9%      1      1
+PDFCreatorWebSetup.exe               454905     581      73    13%      -      -
+PDFCreator_Setup_0.6.0.exe          7367940     515      80    16%      -      -
+ResourceHacker.exe                  6207488   17916     786     4%      0      0
+SpaceSniffer.exe                    2309632   13457    4021    30%      -      -
+
+precision on overlapping names: 2904/2919 = 99.5%
