@@ -454,8 +454,19 @@ def _parse_dynamic_table(r, v):
         return
     ids = [r.i16(p + 2 + 2 * i) for i in range(count)]
     base = p + 2 + 2 * count
+    entries = []
     for i, mid in enumerate(ids):
-        v.dynamic.append({"id": mid, "addr": r.u32(base + 4 * i)})
+        addr = r.u32(base + 4 * i)
+        # Every entry in a real dynamic table is a handler address. If any of
+        # them does not point at code, the slot was read from the wrong offset
+        # and the whole table is noise -- Inno Setup's Compil32 yields 3847
+        # entries per class this way, 94% of them outside the image, which the
+        # count cap alone does not catch. Claiming those names is worse than
+        # recovering none, so discard the table rather than salvage it.
+        if addr is None or not r.is_code(addr):
+            return
+        entries.append({"id": mid, "addr": addr})
+    v.dynamic.extend(entries)
     v.regions.append((p, base + 4 * count, "DynamicTable"))
 
 
