@@ -16,8 +16,8 @@ import struct
 
 BASE     = 0x400000
 CODE_ORG = 0x401000
-DATA_ORG = 0xA00000      # above the ~5.3 MB of staged RTL code
-SPAN     = 0xC00000      # upper bound; render() trims to what is actually used
+DATA_ORG = 0xA00000      # floor: above the ~5.3 MB of staged Delphi 7 RTL code
+DATA_SLACK = 0x200000    # room above the data origin for the slots render() hands out
 ALIGN    = 16
 
 
@@ -64,6 +64,13 @@ class Layout(object):
                                     []).append(cur)
             cur += (len(p['code']) + ALIGN - 1) & ~(ALIGN - 1)
         self.code_end = cur
+        # The data slots sit above the code. Delphi 7 and earlier fit under the
+        # historical origin and stay there, so their images -- and therefore
+        # their signatures -- do not shift; 2005 and later carry more code than
+        # that and push the origin up to just past it. Keeping the floor rather
+        # than always deriving the origin is what makes a rebuild of the older
+        # versions byte-identical.
+        self.data_org = max(DATA_ORG, (self.code_end + 0xFFFF) & ~0xFFFF)
 
     def resolve(self, name, module_id):
         """Prefer a target in the referring module, then any unique match."""
@@ -76,7 +83,7 @@ class Layout(object):
 
     def data_slot(self, name):
         if name not in self.data:
-            self.data[name] = DATA_ORG + 4 * len(self.data)
+            self.data[name] = self.data_org + 4 * len(self.data)
         return self.data[name]
 
     def render(self, path):
@@ -90,9 +97,7 @@ class Layout(object):
         two hash differently.  Trim to the smallest span that holds the code
         and the data slots.
         """
-        if self.code_end > DATA_ORG:
-            raise ValueError("code overflows the data origin")
-        buf = bytearray(SPAN)
+        buf = bytearray(self.data_org - BASE + DATA_SLACK)
         relinked = unresolved = 0
         for addr, p in self.procs:
             o = addr - BASE
@@ -112,6 +117,10 @@ class Layout(object):
                 relinked += 1 if tgt else 0
                 unresolved += 0 if tgt else 1
                 struct.pack_into('<I', buf, o + fofs, val)
-        end = max(self.code_end, DATA_ORG + 4 * len(self.data) + 0x10) - BASE
+        used = 4 * len(self.data) + 0x10
+        if used > DATA_SLACK:
+            raise ValueError("data slots (%d bytes) overflow the reserved span"
+                             % used)
+        end = max(self.code_end, self.data_org + used) - BASE
         open(path, 'wb').write(bytes(buf[:end]))
         return relinked, unresolved
