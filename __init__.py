@@ -142,15 +142,6 @@ def cmd_apply(bv):
     _Task(bv, "Delphi RTTI: applying", work).start()
 
 
-def cmd_undefine_range(bv, addr, length):
-    """Undefine every function overlapping the selected address range."""
-    removed = A.undefine_functions(bv, [(addr, addr + max(length, 1))],
-                                   lambda m: bn.log_info(m, TAG))
-    bn.log_info("removed %d functions in 0x%x-0x%x"
-                % (len(removed), addr, addr + length), TAG)
-    bv.update_analysis()
-
-
 def cmd_scan_range(bv, addr, length):
     """Scan just the selection, then apply everything found in it."""
     def work(task):
@@ -257,10 +248,6 @@ if _SETTINGS.get_bool("delphinja.commands"):
         "Delphi\\Export metadata to JSON",
         "Write every parsed RTTI/VMT record to a JSON file",
         cmd_export, _supported)
-    PluginCommand.register_for_range(
-        "Delphi\\Undefine functions in selection",
-        "Remove every function overlapping the selected range",
-        cmd_undefine_range, _supported)
     PluginCommand.register_for_range(
         "Delphi\\Apply metadata in selection",
         "Scan and apply Delphi metadata found in the selected range only",
