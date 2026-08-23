@@ -131,20 +131,29 @@ def detect_layout(reader, ranges, window=0x40000, ptr_sizes=(4, 8)):
     best, best_score = None, 0
     for ptr_size in ptr_sizes:
         read = reader.u32 if ptr_size == 4 else reader.u64
-        for n_virtuals in Layout.VIRTUAL_COUNTS:
-            layout = Layout(ptr_size, n_virtuals)
-            score = 0
-            for start, end in ranges:
-                limit = min(end, start + window)
-                for addr in range(start, limit, ptr_size):
-                    if read(addr) != addr + layout.header_size:
-                        continue
+        layouts = [Layout(ptr_size, n) for n in Layout.VIRTUAL_COUNTS]
+        # One pass over the window finds the self-referencing addresses for
+        # every candidate header size at once; scoring then only touches those.
+        by_size = {}
+        for layout in layouts:
+            by_size.setdefault(layout.header_size, []).append(layout)
+        scores = {}
+        for start, end in ranges:
+            limit = min(end, start + window)
+            for addr in self_pointers(reader, start, limit, by_size.keys(),
+                                      step=ptr_size, width=ptr_size):
+                val = read(addr)
+                if val is None:
+                    continue
+                for layout in by_size[val - addr]:
                     name_ptr = read(addr + layout.class_name_offset)
                     if name_ptr is None or not reader.is_mapped(name_ptr):
                         continue
                     name, _ = reader.shortstr(name_ptr)
                     if is_identifier(name):
-                        score += 1
+                        scores[layout] = scores.get(layout, 0) + 1
+        for layout in layouts:
+            score = scores.get(layout, 0)
             if score > best_score:
                 best, best_score = layout, score
     return best, best_score
@@ -211,6 +220,75 @@ class Reader(object):
         if len(raw) != n:
             return None, addr
         return raw.decode("latin-1"), addr + 1 + n
+
+
+_TYPECODES = {4: "I", 8: "Q"}
+
+# Bytes pulled out of the view at a time by `self_pointers`. Small enough that
+# an early-exiting caller stops after copying a little, large enough that the
+# per-chunk overhead is lost in the noise.
+_CHUNK = 0x10000
+
+
+def self_pointers(reader, start, end, deltas, step=1, width=4):
+    """Yield, in ascending order, the addresses in [start, end) that point at
+    themselves.
+
+    An address qualifies when the little-endian integer of `width` bytes
+    stored there equals the address plus one of `deltas`. Both Delphi
+    structures announce themselves that way -- a VMT keeps its own address one
+    header back, and a TTypeInfo record sits four bytes past a cell pointing
+    at it -- so this one test is what every scan and probe here is built on,
+    and it is the only thing the plugin does that is O(image size).
+
+    Asking the reader for each address costs about 250 ns per byte of code:
+    a second of Python on a four-megabyte code section, holding the GIL while
+    the rest of analysis waits on it. Pulling the bytes out in blocks and
+    walking them as machine arrays of integers is the same comparison against
+    the same bytes, at about a sixth of the cost.
+
+    A candidate may begin at any byte offset, so each block is walked once per
+    offset within the word and the hits merged; the addresses whose word would
+    run off the end of the block go through the reader, which is also the
+    fallback for a block that cannot be read in one piece. Yielding block by
+    block keeps a caller that stops at the first hit from paying for the rest.
+    """
+    read = reader.u32 if width == 4 else reader.u64
+    deltas = frozenset(deltas)
+    typecode = _TYPECODES.get(width)
+    block = max(_CHUNK, width)
+    for base in range(start, end, block):
+        stop = min(base + block, end)
+        data = reader.bytes(base, stop - base) if typecode else b""
+        if len(data) != stop - base:
+            for addr in range(base, stop, step):
+                val = read(addr)
+                if val is not None and val - addr in deltas:
+                    yield addr
+            continue
+        hits = []
+        view = memoryview(data)
+        for offset in range(0, width, step):
+            count = (len(data) - offset) // width
+            if count <= 0:
+                continue
+            words = view[offset:offset + width * count].cast(typecode)
+            addr = base + offset
+            for word in words:
+                if word - addr in deltas:
+                    hits.append(addr)
+                addr += width
+        # The addresses at the end of the block, whose word the arrays could
+        # not cover, on the same address grid the caller asked for.
+        tail = stop - width + 1
+        tail += -(tail - start) % step
+        for addr in range(max(base, tail), stop, step):
+            val = read(addr)
+            if val is not None and val - addr in deltas:
+                hits.append(addr)
+        hits.sort()
+        for addr in hits:
+            yield addr
 
 
 def is_identifier(text, min_len=1, max_len=128):
@@ -615,25 +693,30 @@ def scan(r, start, end, progress=None):
     almost false-positive free to spot: a VMT stores its own address at -76,
     and the compiler emits each TTypeInfo behind a PPTypeInfo cell that points
     four bytes ahead at the record itself.
+
+    Finding those pointers is `self_pointers`' job; parsing what they point at
+    happens here, on the handful of addresses that survive. The range is
+    walked in chunks so a caller with a progress callback can still watch it,
+    and cancel it, at the same granularity as before.
     """
+    header_size = r.layout.header_size
+    candidates = (header_size, 4)
     vmts, typeinfos = {}, {}
     step = max(1, (end - start) // 100)
-    for addr in range(start, end):
-        if progress and (addr - start) % step == 0:
-            if progress(addr - start, end - start) is False:
-                break
-        val = r.u32(addr)
-        if val is None:
-            continue
-        if val == addr + r.layout.header_size:
-            v = parse_vmt(r, val)
-            if v:
-                vmts[v.addr] = v
-        elif val == addr + 4:
-            ti = parse_typeinfo(r, addr + 4)
-            if ti:
-                ti.ptr_addr = addr
-                typeinfos[ti.addr] = ti
+    for chunk in range(start, end, step):
+        if progress and progress(chunk - start, end - start) is False:
+            break
+        for addr in self_pointers(r, chunk, min(chunk + step, end), candidates):
+            val = r.u32(addr)
+            if val == addr + header_size:
+                v = parse_vmt(r, val)
+                if v:
+                    vmts[v.addr] = v
+            elif val == addr + 4:
+                ti = parse_typeinfo(r, addr + 4)
+                if ti:
+                    ti.ptr_addr = addr
+                    typeinfos[ti.addr] = ti
     return vmts, typeinfos
 
 

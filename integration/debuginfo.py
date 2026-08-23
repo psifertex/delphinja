@@ -45,13 +45,9 @@ def _probe(bv):
     sizes = P.header_sizes()
     for start, end in md._code_ranges:
         limit = min(end, start + PROBE_LIMIT)
-        for addr in range(start, limit):
-            val = md.reader.u32(addr)
-            if val is None:
-                continue
-            for size in sizes:
-                if val == addr + size and P.parse_vmt(md.reader, val) is not None:
-                    return True
+        for addr in P.self_pointers(md.reader, start, limit, sizes):
+            if P.parse_vmt(md.reader, md.reader.u32(addr)) is not None:
+                return True
     return False
 
 

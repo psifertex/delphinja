@@ -31,6 +31,8 @@ and it declines the match.
 """
 
 import os
+import queue
+import re
 
 import binaryninja as bn
 
@@ -69,7 +71,15 @@ FPC_SERIES = {
     "3.2": "3.2.2", "3.3": "3.2.2",
 }
 FPC_DEFAULT = "3.2.2"       # still the current stable release
-_FPC_SCAN_LIMIT = 64        # version strings appear early; do not sweep the image
+
+# The version marker, as a byte-level regular expression for BinaryView.search.
+# Handing the whole pattern to the core is what removes the scan limit this
+# used to need: matching only the literal "FPC" in the core and testing each
+# hit in Python meant a bounded number of hits, and fpcmake.exe and ppc386.exe
+# carry more than sixty "FPC" substrings before the version string, so a
+# 64-hit budget reported them as not-Free-Pascal at all.
+_FPC_PATTERN = r"FPC[ /-](\d+)\.(\d+)\.(\d+)"
+_FPC_GROUPS = re.compile(rb"FPC[ /-](\d+)\.(\d+)\.(\d+)")
 
 
 def library(tag):
@@ -88,25 +98,43 @@ def fpc_version(bv):
     """The FPC release that built this binary, or None if it is not FPC.
 
     Returns the version as written in the binary, e.g. "3.2.2".
+
+    The whole pattern goes to BinaryView.search, which matches it in the core
+    at memory bandwidth and hands back the matched bytes, rather than the core
+    finding "FPC" and Python re-testing every hit across the view lock.
     """
     try:
         if bv.get_section_by_name(".CRT") is None:
             return None
     except Exception:
         return None
-    import re
-    pattern = re.compile(rb"FPC[ /-](\d+)\.(\d+)\.(\d+)")
-    addr, seen = bv.start, 0
-    while addr is not None and seen < _FPC_SCAN_LIMIT:
-        addr = bv.find_next_data(addr, b"FPC")
-        if addr is None:
-            break
-        m = pattern.match(bv.read(addr, 20) or b"")
-        if m:
-            return b".".join(m.groups()).decode()
-        addr += 1
-        seen += 1
-    return None
+    match = _first_match(bv, _FPC_PATTERN)
+    if match is None:
+        return None
+    m = _FPC_GROUPS.match(match)
+    return b".".join(m.groups()).decode() if m else None
+
+
+def _first_match(bv, pattern):
+    """The bytes of the first match of `pattern`, or None.
+
+    `search` runs the scan on a worker thread and publishes matches on a
+    queue; `limit=1` stops the scan at the first one. The generator wrapping
+    that queue polls it on a 0.1s timeout, though, so *iterating it to
+    exhaustion* costs a flat 100ms however quickly the scan finished -- which
+    on a binary with no match is the entire cost. Waiting on the worker
+    instead reports the same answer in the time the scan actually took.
+    """
+    matches = bv.search(pattern, limit=1)
+    thread = getattr(matches, "thread", None)
+    if thread is None:                  # not the generator we expect; iterate
+        found = next(iter(matches), None)
+        return bytes(found[1]) if found else None
+    thread.join()
+    try:
+        return bytes(matches.results.get_nowait()[1])
+    except queue.Empty:
+        return None
 
 
 def fpc_tags(bv):
