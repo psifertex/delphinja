@@ -111,7 +111,7 @@ routines like `Classes.ReadError` requires additional WARP signatures.
 
 `messages.py` maps dynamic-method ids to `WM_*` / `CM_*` / `CN_*` names. The
 `WM_` and `CN_` tables are Win32 constants; the `CM_` table covers
-`CM_BASE + 0..55` from `Controls.pas` and reports anything beyond that as
+`CM_BASE + 0..42` from `Controls.pas` and reports anything beyond that as
 `CM_BASE_<n>` rather than inventing a name. Every applied name is also written
 into the record comment together with the raw id, so a wrong entry in that
 table is visible and reversible. Edit the table freely.

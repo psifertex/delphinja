@@ -1,14 +1,13 @@
 """Delphi metadata as a DebugInfo parser.
 
-This is the preferred entry point.  A DebugInfo parser runs during the
-Discovery phase, before linear sweep has finished inventing functions over the
-RTTI tables, so contributing the metadata as data variables at that point
-stops most of the bogus functions from ever existing.  Measured on a Delphi 7
-sample: 106 sweep-created functions over metadata without it, 7 with it.
+A DebugInfo parser runs during the Discovery phase, before linear sweep has
+finished inventing functions over the RTTI tables, so contributing the
+metadata as data variables at that point stops most of the bogus functions
+from ever existing.
 
 What it cannot do is remove functions or set comments -- neither has an entry
 point in the debug info API at any layer -- so the plugin keeps commands for
-both, for repairing databases that were analysed before the parser existed.
+both, which are also how a database analysed without the parser is repaired.
 """
 
 import time
@@ -32,9 +31,10 @@ PROBE_LIMIT = 0x40000
 def _probe(bv):
     """Cheap early-exit search for one plausible VMT.
 
-    A VMT stores its own address at -76, which is a single dword compare per
-    candidate, and Delphi emits the System unit's VMTs at the very start of
-    the code section -- so a real Delphi binary answers almost immediately.
+    A VMT stores its own address one header back, which is a single dword
+    compare per candidate, and Delphi emits the System unit's VMTs at the very
+    start of the code section -- so a real Delphi binary answers almost
+    immediately.
     """
     if signatures.fpc_version(bv) is not None:
         return True                 # Free Pascal: no VMTs, but libraries to load

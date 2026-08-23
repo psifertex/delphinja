@@ -109,14 +109,13 @@ CM = [
     "CM_FONTCHANGE", "CM_TIMECHANGE", "CM_TABSTOPCHANGED", "CM_UIACTIVATE",
     "CM_UIDEACTIVATE",
 ]
-# Stops at CM_BASE + 42 deliberately. Everything up to here was checked
-# against real binaries -- TCustomEdit's handlers at 14/16/18/26 decode as
+# Stops at CM_BASE + 42 deliberately: an id is listed only once its name has
+# been confirmed against a source, and everything up to here also agrees with
+# real binaries -- TCustomEdit's handlers at 14/16/18/26 decode as
 # CM_FONTCHANGED / CM_CTL3DCHANGED / CM_TEXTCHANGED / CM_ENTER, which is
-# exactly what TCustomEdit declares. Beyond 42 an earlier version of this
-# table was wrong: it listed CM_DOCKCLIENT at 43, where Controls.pas has
-# CM_DOCWINDOWACTIVATE and puts CM_DOCKCLIENT at 56. Rather than swap one
-# unverified table for another, ids past the checked range are reported as
-# CM_BASE_<n> until each name is confirmed against a source.
+# exactly what TCustomEdit declares. Ids past the checked range are reported
+# as CM_BASE_<n>; extend the list only with names read off Controls.pas, since
+# a plausible-looking guess shifts every entry after it.
 
 MSG_KIND_MESSAGE = "message"
 MSG_KIND_INDEX = "index"

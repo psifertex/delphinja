@@ -24,10 +24,11 @@ therefore gets its own container, created complete, instead of one container
 gaining sources over time.
 
 Loading every library at once measurably costs matches as well as precision:
-across 30 corpus binaries, loading only the era-appropriate libraries matched
+across 30 corpus binaries, loading only the version-matched library matched
 *more* functions on 11 of them than loading all fifteen, because several
 libraries claiming the same function GUID leaves the matcher unable to choose
-and it declines the match.
+and it declines the match. Narrowing the set is therefore the point of the
+selection below.
 """
 
 import os
@@ -73,11 +74,11 @@ FPC_SERIES = {
 FPC_DEFAULT = "3.2.2"       # still the current stable release
 
 # The version marker, as a byte-level regular expression for BinaryView.search.
-# Handing the whole pattern to the core is what removes the scan limit this
-# used to need: matching only the literal "FPC" in the core and testing each
-# hit in Python meant a bounded number of hits, and fpcmake.exe and ppc386.exe
-# carry more than sixty "FPC" substrings before the version string, so a
-# 64-hit budget reported them as not-Free-Pascal at all.
+# The whole pattern goes to the core, rather than searching for the literal
+# "FPC" and testing each hit in Python: a Free Pascal binary can carry many
+# dozens of "FPC" substrings ahead of the version string, so a Python-side
+# test needs a hit budget, and any budget small enough to be cheap is one a
+# real binary can exhaust before reaching the marker.
 _FPC_PATTERN = r"FPC[ /-](\d+)\.(\d+)\.(\d+)"
 _FPC_GROUPS = re.compile(rb"FPC[ /-](\d+)\.(\d+)\.(\d+)")
 

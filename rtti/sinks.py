@@ -7,10 +7,10 @@ mutates state goes through a sink so the recovery logic stays destination
 agnostic.
 
 A DebugInfo parser runs during the Discovery phase, before linear sweep has
-finished, which is why it is the better destination: data variables laid down
-there stop the sweep from inventing functions over the RTTI tables in the
-first place, instead of deleting them afterwards.  It cannot express comments
-and it cannot remove anything, so those stay on the view path.
+finished, so data variables laid down there stop the sweep from inventing
+functions over the RTTI tables in the first place rather than deleting them
+afterwards.  It cannot express comments and it cannot remove anything, so
+those stay on the view path.
 """
 
 import binaryninja as bn
@@ -138,14 +138,12 @@ class AutoSink(Sink):
             # has reached it yet. Deliberately NOT auto_discovered: these
             # functions are reached only through Delphi's interface and dynamic
             # method tables, so nothing points at them until the applier has
-            # declared those tables as arrays of code pointers -- and until it
-            # did, core.module.deleteUnusedAutoFunctions removed every one of
-            # them, taking their names and WARP matches with them. Losing an
-            # adjustor thunk that way also stranded its jump target, which a
-            # misaligned sweep artifact then absorbed. The typed tables now
-            # carry the references, but the ordering is not guaranteed, so
-            # this stays. Still an auto function: re-derivable, and not
-            # recorded as something the user asserted.
+            # declared those tables as arrays of code pointers, and
+            # core.module.deleteUnusedAutoFunctions deletes unreferenced
+            # auto-discovered functions. The typed tables do carry those
+            # references, but the ordering between the two is not guaranteed.
+            # Still an auto function: re-derivable, and not recorded as
+            # something the user asserted.
             func = bv.add_function(addr)
             if func is None:
                 return False
