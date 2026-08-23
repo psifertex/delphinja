@@ -37,12 +37,18 @@ def _probe(bv):
     the code section -- so a real Delphi binary answers almost immediately.
     """
     md = A.DelphiMetadata(bv)
+    # Every era's header size, not just the 76-byte one: a Delphi 2009 binary
+    # puts its self-pointer 88 bytes back, and probing only for 76 answers
+    # "not Delphi" for the whole modern range.
+    sizes = P.header_sizes()
     for start, end in md._code_ranges:
         limit = min(end, start + PROBE_LIMIT)
         for addr in range(start, limit):
             val = md.reader.u32(addr)
-            if val is not None and val == addr + P.VMT_HEADER_SIZE:
-                if P.parse_vmt(md.reader, val) is not None:
+            if val is None:
+                continue
+            for size in sizes:
+                if val == addr + size and P.parse_vmt(md.reader, val) is not None:
                     return True
     return False
 

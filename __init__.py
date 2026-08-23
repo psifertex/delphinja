@@ -154,8 +154,13 @@ def cmd_scan_range(bv, addr, length):
 
 def cmd_describe(bv, addr):
     md = A.DelphiMetadata(bv)
-    vmt = P.parse_vmt(md.reader, addr) or P.parse_vmt(md.reader,
-                                                      addr + P.VMT_HEADER_SIZE)
+    # Accept either the class pointer or the start of its header, whichever
+    # the cursor is on, for any era's header size.
+    vmt = P.parse_vmt(md.reader, addr)
+    for size in P.header_sizes(md.layout.ptr_size):
+        if vmt is not None:
+            break
+        vmt = P.parse_vmt(md.reader, addr + size)
     if vmt:
         md.scan([(vmt.header, vmt.vtable_end)])
         bn.log_info("\n" + A.describe_vmt(md, vmt), TAG)

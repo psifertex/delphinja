@@ -604,15 +604,13 @@ class NameClaims(object):
 # -------------------------------------------------------------------- applier
 
 VMT_HEADER_TYPE = "TVmtHeader"
-_VMT_HEADER_FIELDS = [
+# The eleven data slots. The virtual slots that follow them differ per era and
+# are appended from P.std_methods(), so this table stays era-independent.
+_VMT_DATA_FIELDS = [
     ("SelfPtr", "void*"), ("IntfTable", "void*"), ("AutoTable", "void*"),
     ("InitTable", "void*"), ("TypeInfo", "void*"), ("FieldTable", "void*"),
     ("MethodTable", "void*"), ("DynamicTable", "void*"),
     ("ClassName", "char*"), ("InstanceSize", "uint32"), ("Parent", "void*"),
-    ("SafeCallException", "code*"), ("AfterConstruction", "code*"),
-    ("BeforeDestruction", "code*"), ("Dispatch", "code*"),
-    ("DefaultHandler", "code*"), ("NewInstance", "code*"),
-    ("FreeInstance", "code*"), ("Destroy", "code*"),
 ]
 
 
@@ -704,13 +702,16 @@ class Applier(object):
         name = self.opt["prefix"] + VMT_HEADER_TYPE
         sb = StructureBuilder.create()
         sb.packed = True
+        layout = self.md.layout
         ptr = Type.pointer(self.bv.arch, Type.void())
-        for i, (fname, kind) in enumerate(_VMT_HEADER_FIELDS):
-            t = (Type.int(4, False) if kind == "uint32"
+        fields = _VMT_DATA_FIELDS + [(m, "code*") for _, m in P.std_methods(layout)]
+        for i, (fname, kind) in enumerate(fields):
+            t = (Type.int(layout.ptr_size, False) if kind == "uint32"
                  else Type.pointer(self.bv.arch, Type.char()) if kind == "char*"
+                 else self.factory.code_pointer() if kind == "code*"
                  else ptr)
-            sb.add_member_at_offset(fname, t, i * 4)
-        sb.width = P.VMT_HEADER_SIZE
+            sb.add_member_at_offset(fname, t, i * layout.ptr_size)
+        sb.width = layout.header_size
         self.sink.add_type(name, Type.structure_type(sb))
 
     def _data(self, addr, ty, name):
@@ -745,7 +746,7 @@ class Applier(object):
         self._data(vmt.header, Type.named_type_reference(
             NamedTypeReferenceClass.StructNamedTypeClass,
             self.opt["prefix"] + VMT_HEADER_TYPE,
-            width=P.VMT_HEADER_SIZE), "VMT_" + base)
+            width=self.md.layout.header_size), "VMT_" + base)
         n = len(vmt.virtuals)
         if n:
             self._data(vmt.addr, self.factory.code_pointer_array(n),
@@ -815,7 +816,7 @@ class Applier(object):
                 claims.claim(d["addr"],
                              "%s.%s" % (cls, messages.handler_name(d["id"])),
                              depth, vmt.addr)
-            for off, slot in P.VMT_STD_METHODS:
+            for off, slot in P.std_methods(self.md.layout):
                 claims.claim(self.md.reader.u32(vmt.addr + off),
                              "%s.%s" % (cls, slot), depth, vmt.addr)
             self._claim_interfaces(claims, vmt, depth)
@@ -873,7 +874,7 @@ class Applier(object):
             slot = other.addr + offset
             if offset >= 0 and slot >= other.vtable_end:
                 continue                       # slot past this class's vtable
-            if offset < 0 and offset < -P.VMT_HEADER_SIZE:
+            if offset < 0 and offset < -self.md.layout.header_size:
                 continue
             claims.claim(self.md.reader.u32(slot),
                          "%s.%s_%s" % (sanitize(other.name), verb, pname),

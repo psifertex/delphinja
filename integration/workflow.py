@@ -45,17 +45,24 @@ PROBE_LIMIT = 0x40000
 def probe(bv):
     """Cheap early-exit search for one plausible VMT.
 
-    A VMT stores its own address at -76, one dword compare per candidate, and
-    Delphi emits the System unit's VMTs at the very start of the code section --
-    so a real Delphi binary answers almost immediately and anything else costs
-    a bounded scan.
+    A VMT stores its own address at the start of its header, one dword compare
+    per candidate, and Delphi emits the System unit's VMTs at the very start of
+    the code section -- so a real Delphi binary answers almost immediately and
+    anything else costs a bounded scan.
+
+    Every era's header size is tried, not just the 76-byte one: a Delphi 2009
+    binary puts its self-pointer 88 bytes back, and probing only for 76 answers
+    "not Delphi" for the entire modern range.
     """
     md = A.DelphiMetadata(bv)
+    sizes = P.header_sizes()
     for start, end in md._code_ranges:
         for addr in range(start, min(end, start + PROBE_LIMIT)):
             val = md.reader.u32(addr)
-            if val is not None and val == addr + P.VMT_HEADER_SIZE:
-                if P.parse_vmt(md.reader, val) is not None:
+            if val is None:
+                continue
+            for size in sizes:
+                if val == addr + size and P.parse_vmt(md.reader, val) is not None:
                     return True
     return False
 

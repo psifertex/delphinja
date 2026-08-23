@@ -28,20 +28,57 @@ METHOD_KINDS = {0: "mkProcedure", 1: "mkFunction", 2: "mkConstructor",
 PARAM_FLAGS = [(0x01, "pfVar"), (0x02, "pfConst"), (0x04, "pfArray"),
                (0x08, "pfAddress"), (0x10, "pfReference"), (0x20, "pfOut")]
 
-# VMT slots at negative offsets from the VMT (class pointer) address.
-VMT_NEG = [
-    (-76, "vmtSelfPtr"), (-72, "vmtIntfTable"), (-68, "vmtAutoTable"),
-    (-64, "vmtInitTable"), (-60, "vmtTypeInfo"), (-56, "vmtFieldTable"),
-    (-52, "vmtMethodTable"), (-48, "vmtDynamicTable"), (-44, "vmtClassName"),
-    (-40, "vmtInstanceSize"), (-36, "vmtParent"),
+# The eleven data slots, in order from the start of the VMT header. Their
+# order has never changed; only the header's distance from the class pointer
+# has, because TObject gained virtual methods. Deriving the offsets from the
+# layout rather than writing them down is what makes one build read every era:
+# a table hardcoded to the 76-byte header reads a Delphi 2009 binary's slots
+# twelve bytes off and finds no tables at all.
+DATA_SLOT_NAMES = [
+    "vmtSelfPtr", "vmtIntfTable", "vmtAutoTable", "vmtInitTable",
+    "vmtTypeInfo", "vmtFieldTable", "vmtMethodTable", "vmtDynamicTable",
+    "vmtClassName", "vmtInstanceSize", "vmtParent",
 ]
-# Virtual slots that every TObject descendant carries, in order from -32.
-VMT_STD_METHODS = [
-    (-32, "SafeCallException"), (-28, "AfterConstruction"),
-    (-24, "BeforeDestruction"), (-20, "Dispatch"), (-16, "DefaultHandler"),
-    (-12, "NewInstance"), (-8, "FreeInstance"), (-4, "Destroy"),
+
+# The standard TObject virtual slots, newest first. Each era appends to the
+# END of this list conceptually -- new methods are inserted just after
+# vmtParent, pushing nothing -- so an era with N virtuals uses the LAST N
+# names, and the shared ones keep the same offsets they always had.
+# Delphi 2 has the final five; Delphi 3 added SafeCallException,
+# AfterConstruction and BeforeDestruction; Delphi 2009 added Equals,
+# GetHashCode and ToString.
+STD_METHOD_NAMES = [
+    "Equals", "GetHashCode", "ToString",
+    "SafeCallException", "AfterConstruction", "BeforeDestruction",
+    "Dispatch", "DefaultHandler", "NewInstance", "FreeInstance", "Destroy",
 ]
-VMT_HEADER_SIZE = 76        # Delphi 3 - 2007; see Layout for the others
+
+VMT_HEADER_SIZE = 76        # Delphi 3 - 2007 only; prefer layout.header_size
+
+
+def data_slots(layout):
+    """[(offset from the class pointer, slot name)] for this layout."""
+    return [(-layout.header_size + i * layout.ptr_size, name)
+            for i, name in enumerate(DATA_SLOT_NAMES)]
+
+
+def std_methods(layout):
+    """[(offset from the class pointer, method name)] for this layout.
+
+    An era with more virtuals than we have names for gets positional names for
+    the extras rather than a wrong name borrowed from a neighbouring era.
+    """
+    n = layout.n_virtuals
+    names = STD_METHOD_NAMES[-n:] if n <= len(STD_METHOD_NAMES) else (
+        ["Virtual%d" % i for i in range(n - len(STD_METHOD_NAMES))]
+        + STD_METHOD_NAMES)
+    return [(-(len(names) - i) * layout.ptr_size, name)
+            for i, name in enumerate(names)]
+
+
+def header_sizes(ptr_size=4):
+    """Every plausible VMT header size, for probes that have no layout yet."""
+    return [(Layout.DATA_SLOTS + n) * ptr_size for n in Layout.VIRTUAL_COUNTS]
 
 
 class Layout(object):
@@ -404,10 +441,10 @@ def parse_vmt(r, addr):
 
     v = Vmt(addr, layout)
     v.name = name
-    for off, slot in VMT_NEG:
-        v.slots[slot] = r.u32(addr + off)
+    for off, slot in data_slots(layout):
+        v.slots[slot] = r.ptr(addr + off)
     v.instance_size = v.slots["vmtInstanceSize"]
-    v.parent_ptr = addr - 36
+    v.parent_ptr = addr - layout.header_size + 10 * layout.ptr_size
     pp = v.slots["vmtParent"]
     if pp and r.is_mapped(pp):
         v.parent = r.u32(pp)
