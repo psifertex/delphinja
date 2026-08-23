@@ -15,3 +15,8 @@ __pycache__/
 # plugin's shipped payload and belong in the repository.
 *.warp
 !signatures/*.warp
+
+# FPC research: upstream compiler sources and derived datasets, kept here so
+# the material lives with the project rather than in a temp directory. Not
+# ours to redistribute, and inputs rather than deliverables.
+fpc-research/

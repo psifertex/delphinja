@@ -24,50 +24,17 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)             # the plugin package
 
-# Scratch Binary Ninja user directory. Set before binaryninja is imported so a
-# batch run cannot write to the real one -- Settings() writes are global.
-os.environ.setdefault("BN_USER_DIRECTORY", "/tmp/bn-build-home")
-for sub in ("", "/plugins", "/signatures"):
-    os.makedirs(os.environ["BN_USER_DIRECTORY"] + sub, exist_ok=True)
+# ROOT, not its parent: importing `delphinja` would execute the plugin's
+# __init__ and register the recovery workflow inside this process, which would
+# then run against the staged signature image and remove functions from it.
+# `tools` has no such side effects.
+sys.path.insert(0, ROOT)
 
+from tools import bnenv       # noqa: E402  (must precede any binaryninja import)
 
-def _seed_scratch_user_directory():
-    """Give the scratch directory the minimum it needs to start.
-
-    An isolated user directory has no licence and no enterprise server, and
-    binaryninja fails at load with "Unknown Enterprise Server URL" rather than
-    at import -- so an unattended run gets through staging and dies on the
-    first analysis. Copy the licence and carry over just the server URL; do
-    not copy the whole settings file, or the run inherits whatever analysis
-    settings happen to be set interactively.
-    """
-    import json
-    import shutil
-    scratch = os.environ["BN_USER_DIRECTORY"]
-    real = os.path.expanduser("~/Library/Application Support/Binary Ninja")
-    licence = os.path.join(real, "license.dat")
-    if os.path.exists(licence) and not os.path.exists(os.path.join(scratch, "license.dat")):
-        shutil.copy2(licence, os.path.join(scratch, "license.dat"))
-    settings_path = os.path.join(scratch, "settings.json")
-    settings = {}
-    if os.path.exists(settings_path):
-        try:
-            settings = json.load(open(settings_path))
-        except Exception:
-            settings = {}
-    if "enterprise.server.url" not in settings:
-        try:
-            real_settings = json.load(open(os.path.join(real, "settings.json")))
-        except Exception:
-            real_settings = {}
-        url = real_settings.get("enterprise.server.url")
-        if url:
-            settings["enterprise.server.url"] = url
-    settings.setdefault("corePlugins.warp", True)
-    json.dump(settings, open(settings_path, "w"), indent=2)
-
-
-_seed_scratch_user_directory()
+# Scratch Binary Ninja user directory, seeded so an unattended run can start.
+# Set before binaryninja is imported: Settings() writes are global.
+bnenv.scratch_user_directory()
 
 KB_TAGS = ["2", "3", "4", "5", "6", "7",
            "2005", "2006", "2007", "2009", "2010",
@@ -133,11 +100,6 @@ def main(outdir, workdir, only=None):
 
 
 if __name__ == "__main__":
-    # ROOT, not its parent: importing `delphinja` would execute the plugin's
-    # __init__ and register the recovery workflow inside this process, which
-    # would then run against the staged signature image and remove functions
-    # from it. `tools` has no such side effects.
-    sys.path.insert(0, ROOT)
     import binaryninja
     binaryninja.disable_default_log()
     main(sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "signatures"),

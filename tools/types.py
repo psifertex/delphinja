@@ -68,9 +68,19 @@ def _base(bv):
 
 
 class TypeMap(object):
-    def __init__(self, bv):
+    def __init__(self, bv, extra=None):
+        """`extra` adds dialect-specific names to the base table.
+
+        Free Pascal shares most of Delphi's type vocabulary but not all of it
+        (`QWord`, `PtrInt`, `RawByteString`, ...), and it spells types in
+        upper case; `resolve` already lowercases, so a dialect only has to
+        contribute the names Delphi does not have.  Nothing is overridden by
+        default, so the Delphi libraries are unaffected.
+        """
         self.bv = bv
         self.base = _base(bv)
+        if extra:
+            self.base.update(extra)
         self.void_ptr = Type.pointer(bv.arch, Type.void())
 
     def resolve(self, text, classes=None):

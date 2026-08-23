@@ -82,6 +82,15 @@ Note that WARP reads a container's sources when the container is created, so a
 library written by a running process is not visible to it -- generate and test
 in separate processes.
 
+## Free Pascal
+
+Everything above is the Delphi pipeline. Free Pascal binaries are built from
+the same four steps against a different source — a shipped FPC release's `.o`
+files rather than an IDR knowledge base — and that half lives in
+[FPC.md](FPC.md), with its own modules (`coff.py`, `fpcname.py`, `fpcstage.py`,
+`fpctypes.py`, `fpcgen.py`, `build_fpc.py`, `fpceval.py`). `types.py`,
+`naming.py` and `bnenv.py` are shared.
+
 ## Modules
 
 | File | Contents |
@@ -95,6 +104,7 @@ in separate processes.
 | `tools/build_all.py` | Builds every version, unattended and resumable |
 | `tools/evaluate.py` | Corpus evaluation and precision measurement |
 | `tools/run.py` | CLI for a single knowledge base |
+| `tools/bnenv.py` | Scratch Binary Ninja user directory for batch runs |
 
 ## Attribution
 
