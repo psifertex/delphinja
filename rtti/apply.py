@@ -249,10 +249,10 @@ def _range_index(ranges):
     prefix of the array and the furthest either of them reaches is one lookup.
 
     The ranges are indexed, never coalesced.  Merging even two spans that
-    merely touch would answer differently for a zero-length query sitting on
-    the seam -- [0,10) and [10,20) reject a query of [10,10), their merger
-    accepts it -- and a merge across any gap at all would claim bytes no
-    caller passed, which is how a real function at 0x41ba28 was once lost.
+    merely touch answers differently for a zero-length query on the seam --
+    [0,10) and [10,20) reject a query of [10,10), their merger accepts it --
+    and merging across any gap claims bytes no caller passed, which undefines
+    functions that are not metadata.
     """
     ordered = sorted(ranges)
     starts = [s for s, _ in ordered]
