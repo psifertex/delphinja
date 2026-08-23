@@ -378,6 +378,7 @@ class Vmt(object):
         self.parent_ptr = None       # address of the PClass cell
         self.methods = []            # published methods: name + address
         self.dynamic = []            # dynamic/message methods
+        self.dynamic_table = None    # geometry of the table behind `dynamic`
         self.fields = []             # published fields
         self.field_classes = []      # class table backing the field list
         self.interfaces = []
@@ -467,6 +468,11 @@ def _parse_dynamic_table(r, v):
             return
         entries.append({"id": mid, "addr": addr})
     v.dynamic.extend(entries)
+    # The geometry, not just the entries: the table is two parallel arrays
+    # whose lengths are only known here, and typing the pointer array is what
+    # turns the handlers into referenced code rather than loose addresses.
+    v.dynamic_table = {"addr": p, "count": count, "ids": p + 2,
+                       "handlers": base, "end": base + 4 * count}
     v.regions.append((p, base + 4 * count, "DynamicTable"))
 
 
@@ -512,23 +518,38 @@ def _parse_intf_table(r, v):
         e = p + 4 + 28 * i
         v.interfaces.append({
             "guid": _guid(r.bytes(e, 16)), "vtable": r.u32(e + 16),
-            "offset": r.i32(e + 20), "getter": r.u32(e + 24), "entry": e})
+            "offset": r.i32(e + 20), "getter": r.u32(e + 24), "entry": e,
+            "slots": 0})
     v.regions.append((p, p + 4 + 28 * count, "IntfTable"))
 
     # Each entry points at a vtable of thunk addresses.  That array is data,
     # and unlike the entry table it is not otherwise covered -- leaving it
     # bare lets linear sweep disassemble a run of pointers as code and walk
-    # from there into the VMT behind it.
+    # from there into the VMT behind it.  Its length is kept on the entry as
+    # well as in the region, because that is what the applier has to declare
+    # for the thunks in it to be referenced at all.
+    #
+    # A class implementing several interfaces emits their vtables one after
+    # another, and walking the pointers cannot find the boundary between two
+    # of them -- every entry of the next table is a code address too.  The
+    # next table's own address is that boundary, so bound the walk with it.
+    # Without it the first vtable is declared over the second, and the array
+    # defined for the second then erases the first.
+    starts = sorted({e["vtable"] for e in v.interfaces
+                     if e["vtable"] and r.is_mapped(e["vtable"])})
     for entry in v.interfaces:
         vtable = entry["vtable"]
         if not vtable or not r.is_mapped(vtable):
             continue
+        limit = next((s for s in starts if s > vtable), None)
+        limit = 1024 if limit is None else min(1024, (limit - vtable) // 4)
         slots = 0
-        while slots < 1024:
+        while slots < limit:
             target = r.u32(vtable + 4 * slots)
             if not target or not r.is_code(target):
                 break
             slots += 1
+        entry["slots"] = slots
         if slots:
             v.regions.append((vtable, vtable + 4 * slots, "IntfVTable"))
 

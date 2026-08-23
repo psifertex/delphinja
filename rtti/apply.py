@@ -288,6 +288,7 @@ class TypeFactory(object):
         self.owned = {}
         self.enums = 0
         self.structs = 0
+        self._register_cc = False        # unresolved; None once looked up
 
     def qname(self, name):
         return self.prefix + sanitize(name)
@@ -418,6 +419,103 @@ class TypeFactory(object):
             self.structs += 1
         return Type.named_type_reference(
             NamedTypeReferenceClass.StructNamedTypeClass, name, width=8)
+
+    # -- the tables that reach code -------------------------------------
+
+    def code_pointer(self):
+        """A pointer to a function, not to void.
+
+        The distinction is the whole point of typing these tables: a slot
+        declared as a function pointer makes the address it holds a reference
+        to that code, so the handler stops looking unreachable.  Delphi's own
+        convention comes with it -- Self arrives in EAX for every one of these
+        entries.
+        """
+        return Type.pointer(self.bv.arch,
+                            Type.function(calling_convention=self._cc()))
+
+    def _cc(self):
+        if self._register_cc is False:
+            try:
+                self._register_cc = self.bv.arch.calling_conventions.get(
+                    "register")
+            except Exception:
+                self._register_cc = None
+        return self._register_cc
+
+    def dynamic_table_type(self, count):
+        """The dynamic method table: parallel id and handler arrays.
+
+        Delphi's dynamic (and message) methods are dispatched by searching
+        this table, so nothing in the code ever names the handlers -- they are
+        reachable only as elements of the pointer array, and only if something
+        says that is what the bytes are.
+        """
+        name = "%sTDynamicMethodTable_%d" % (self.prefix, count)
+        width = 2 + 6 * count
+        if name not in self.defined:
+            sb = StructureBuilder.create()
+            sb.packed = True
+            sb.add_member_at_offset("Count", Type.int(2, False), 0)
+            sb.add_member_at_offset("Ids", Type.array(Type.int(2, True),
+                                                      count), 2)
+            sb.add_member_at_offset(
+                "Handlers", Type.array(self.code_pointer(), count), 2 + 2 * count)
+            sb.width = width
+            self.sink.add_type(name, Type.structure_type(sb))
+            self.defined[name] = True
+            self.structs += 1
+        return Type.named_type_reference(
+            NamedTypeReferenceClass.StructNamedTypeClass, name, width=width)
+
+    def code_pointer_array(self, count):
+        """A method table: `count` consecutive pointers to code."""
+        return Type.array(self.code_pointer(), count)
+
+    INTF_ENTRY_SIZE = 28
+
+    def _interface_entry_type(self):
+        """TInterfaceEntry: GUID, vtable, instance offset, getter."""
+        name = self.prefix + "TInterfaceEntry"
+        if name not in self.defined:
+            sb = StructureBuilder.create()
+            sb.packed = True
+            sb.add_member_at_offset("IID", Type.array(Type.int(1, False), 16), 0)
+            sb.add_member_at_offset(
+                "VTable", Type.pointer(self.bv.arch, self.code_pointer()), 16)
+            sb.add_member_at_offset("IOffset", Type.int(4, True), 20)
+            # Usually zero, and sometimes tagged ($FF/$FE) rather than an
+            # address; a tagged value is not a valid offset, so no reference
+            # comes of it.
+            sb.add_member_at_offset("ImplGetter", self.code_pointer(), 24)
+            sb.width = self.INTF_ENTRY_SIZE
+            self.sink.add_type(name, Type.structure_type(sb))
+            self.defined[name] = True
+            self.structs += 1
+        return Type.named_type_reference(
+            NamedTypeReferenceClass.StructNamedTypeClass, name,
+            width=self.INTF_ENTRY_SIZE)
+
+    def interface_table_type(self, count):
+        """TInterfaceTable: the count, then one entry per implemented interface.
+
+        Typing it is what makes each interface's vtable a referenced address
+        rather than a dword that happens to look like one.
+        """
+        entry = self._interface_entry_type()
+        name = "%sTInterfaceTable_%d" % (self.prefix, count)
+        width = 4 + self.INTF_ENTRY_SIZE * count
+        if name not in self.defined:
+            sb = StructureBuilder.create()
+            sb.packed = True
+            sb.add_member_at_offset("EntryCount", Type.int(4, True), 0)
+            sb.add_member_at_offset("Entries", Type.array(entry, count), 4)
+            sb.width = width
+            self.sink.add_type(name, Type.structure_type(sb))
+            self.defined[name] = True
+            self.structs += 1
+        return Type.named_type_reference(
+            NamedTypeReferenceClass.StructNamedTypeClass, name, width=width)
 
     def prop_type(self, prop):
         return self.rtti_type(self.md.typeinfo_by_ptr(prop["PropType"]))
@@ -650,12 +748,58 @@ class Applier(object):
             width=P.VMT_HEADER_SIZE), "VMT_" + base)
         n = len(vmt.virtuals)
         if n:
-            self._data(vmt.addr, Type.array(
-                Type.pointer(self.bv.arch, Type.void()), n),
-                "vtable_" + base)
+            self._data(vmt.addr, self.factory.code_pointer_array(n),
+                       "vtable_" + base)
         self._comment(vmt.header, describe_vmt(self.md, vmt))
+        typed = self._apply_tables(vmt, base)
         for start, end, label in vmt.regions:
+            if start in typed:
+                continue
             self._bytes_var(start, end, "%s_%s" % (label, base))
+
+    def _apply_tables(self, vmt, base):
+        """Declare the dynamic and interface method tables as what they are.
+
+        Both are arrays of code pointers, and both are the only thing that
+        reaches the code they point at: a message handler is found by scanning
+        the dynamic table, and an interface method is called through the
+        interface's vtable, so no instruction anywhere holds either address.
+        Left as bytes -- which is what the region fallback makes them -- every
+        one of those functions has no references at all, which is both wrong
+        and, since it is what the core's unused-function pass tests, dangerous.
+
+        Returns the region starts handled here, so the caller does not also
+        cover them with a byte array.
+        """
+        handled = set()
+        table = vmt.dynamic_table
+        if table and table["count"]:
+            self._data(table["addr"],
+                       self.factory.dynamic_table_type(table["count"]),
+                       "DynamicTable_" + base)
+            handled.add(table["addr"])
+
+        for entry in vmt.interfaces:
+            vtable, slots = entry["vtable"], entry.get("slots") or 0
+            # Two interfaces of one class can share a vtable, when the second
+            # is an ancestor of the first and needs no thunks of its own.
+            if not slots or vtable in handled:
+                continue
+            # One class implements several interfaces, so the class name alone
+            # would name every one of its vtables the same thing.
+            iname = sanitize(self.md.interface_names().get(entry["guid"],
+                                                           "IUnknown"))
+            self._data(vtable, self.factory.code_pointer_array(slots),
+                       "IntfVTable_%s_%s" % (base, iname))
+            handled.add(vtable)
+
+        start = vmt.slots.get("vmtIntfTable")
+        if vmt.interfaces and start:
+            self._data(start,
+                       self.factory.interface_table_type(len(vmt.interfaces)),
+                       "IntfTable_" + base)
+            handled.add(start)
+        return handled
 
     # -- function naming --------------------------------------------------
 

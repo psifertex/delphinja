@@ -137,13 +137,15 @@ class AutoSink(Sink):
             # The metadata is proof this is an entry point even though nothing
             # has reached it yet. Deliberately NOT auto_discovered: these
             # functions are reached only through Delphi's interface and dynamic
-            # method tables, which nothing models as arrays of code pointers, so
-            # they carry no references at all -- and core.module.
-            # deleteUnusedAutoFunctions then removed every one of them, taking
-            # their names and WARP matches with them. Losing an adjustor thunk
-            # that way also stranded its jump target, which a misaligned sweep
-            # artifact then absorbed. Still an auto function: re-derivable, and
-            # not recorded as something the user asserted.
+            # method tables, so nothing points at them until the applier has
+            # declared those tables as arrays of code pointers -- and until it
+            # did, core.module.deleteUnusedAutoFunctions removed every one of
+            # them, taking their names and WARP matches with them. Losing an
+            # adjustor thunk that way also stranded its jump target, which a
+            # misaligned sweep artifact then absorbed. The typed tables now
+            # carry the references, but the ordering is not guaranteed, so
+            # this stays. Still an auto function: re-derivable, and not
+            # recorded as something the user asserted.
             func = bv.add_function(addr)
             if func is None:
                 return False
