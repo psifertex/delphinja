@@ -10,15 +10,16 @@ Binary Ninja workflow for Delphi and the Visual Component Library (VCL). Include
 - **Signature libraries** ([WARP](https://dev-docs.binary.ninja/guide/warp.html),
   Binary Ninja's signature format) cover what no binary carries: the ordinary virtual
   methods and unit-level runtime library (RTL) procedures that Delphi statically links and
-  strips the symbols from. These ship with the plugin and are registered at
-  load, so nothing has to be copied into a signature directory.
+  strips the symbols from. These ship with the plugin and are loaded on
+  demand -- only the libraries matching the binary's Delphi era, once it has
+  been detected -- so nothing has to be copied into a signature directory.
 Delphi 2 through 10.x are supported. The VMT layout is detected per binary.
 
 ## Layout
 
     rtti/          the decoder and everything that applies what it finds
     integration/   how that reaches Binary Ninja: workflow, debug info, WARP
-    signatures/    the .warp libraries, registered at load
+    signatures/    the .warp libraries, loaded on demand per binary
     tools/         standalone signature generation tools
 
 Further reading:

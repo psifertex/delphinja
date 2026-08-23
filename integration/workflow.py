@@ -31,6 +31,7 @@ from binaryninja import Activity, Workflow
 from ..rtti import apply as A
 from ..rtti import parser as P
 from ..rtti import sinks
+from . import signatures
 
 ACTIVITY = "analysis.plugins.delphinja"
 CLEANUP = "analysis.plugins.delphinjaCleanup"
@@ -80,6 +81,12 @@ def _recover(context):
         t0 = time.time()
         md = A.DelphiMetadata(bv).scan()
         t_scan = time.time() - t0
+        # Now that the layout is known, load the signature libraries that can
+        # plausibly match this binary -- and only those. This runs before WARP
+        # matches, which is the point: registering every library would leave
+        # the matcher choosing between versions and declining the ambiguous
+        # ones.
+        signatures.register_for(getattr(md.layout, "header_size", None), TAG)
         t0 = time.time()
         sink = sinks.AutoSink(bv, md)
         stats = A.Applier(md, {"undefine": False}, sink=sink).run()

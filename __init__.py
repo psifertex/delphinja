@@ -13,7 +13,7 @@ functions a binary statically links are named and typed too.
 
     rtti/          the decoder and everything that applies what it finds
     integration/   how that reaches Binary Ninja: workflow, debug info, WARP
-    signatures/    the .warp libraries, registered at load
+    signatures/    the .warp libraries, loaded on demand per binary
     tools/         how those libraries are built; not imported at load
 """
 
@@ -192,9 +192,10 @@ for _key, _title, _desc in (
         ("commands", "Delphi Plugin Commands",
          "Register the Delphi menu commands."),
         ("signatures", "Bundled WARP Signatures",
-         "Register the Delphi runtime signature libraries that ship with "
-         "this plugin. Turn off to use only the signatures installed in the "
-         "user and install signature directories.")):
+         "Load the bundled Delphi runtime signature libraries on demand, "
+         "choosing the ones that match the binary being analysed. Turn off "
+         "to use only the signatures installed in the user and install "
+         "signature directories.")):
     _SETTINGS.register_setting("delphinja.%s" % _key, json.dumps({
         "title": _title, "type": "boolean", "default": True,
         "description": _desc}))
@@ -205,10 +206,6 @@ for _key, _title, _desc in (
 if _SETTINGS.get_bool("delphinja.demangler"):
     D.register()
 
-# Registered into WARP's container cache rather than copied into the user's
-# signature directory, so the libraries travel with the plugin.
-if _SETTINGS.get_bool("delphinja.signatures"):
-    SIG.register(TAG)
 # One decoder, two delivery mechanisms. Both drive the same parser, scanner
 # and type construction through sinks; they differ only in where the results
 # are written and when. Switchable at runtime so the two can be compared on

@@ -19,6 +19,7 @@ from binaryninja import debuginfo
 from ..rtti import apply as A
 from ..rtti import parser as P
 from ..rtti import sinks
+from . import signatures
 
 PARSER_NAME = "Delphi RTTI"
 TAG = A.TAG
@@ -74,6 +75,7 @@ def parse_info(debug_info, bv, debug_file, progress):
         t_scan = time.time() - t0
         if cancelled[0]:
             return False
+        signatures.register_for(getattr(md.layout, "header_size", None), TAG)
 
         t0 = time.time()
         sink = sinks.DebugInfoSink(debug_info, bv, md)
