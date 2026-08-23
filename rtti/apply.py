@@ -1,5 +1,6 @@
 """Turn parsed Delphi metadata into Binary Ninja types, symbols and names."""
 
+import bisect
 import json
 import re
 
@@ -240,12 +241,51 @@ class DelphiMetadata(object):
 
 # ---------------------------------------------------------------- undefining
 
+def _range_index(ranges):
+    """Prepare `ranges` for O(log n) overlap queries by `_overlaps`.
+
+    Returns the range starts in ascending order alongside a running maximum
+    of the ends, so that the ranges beginning before any given address are a
+    prefix of the array and the furthest either of them reaches is one lookup.
+
+    The ranges are indexed, never coalesced.  Merging even two spans that
+    merely touch would answer differently for a zero-length query sitting on
+    the seam -- [0,10) and [10,20) reject a query of [10,10), their merger
+    accepts it -- and a merge across any gap at all would claim bytes no
+    caller passed, which is how a real function at 0x41ba28 was once lost.
+    """
+    ordered = sorted(ranges)
+    starts = [s for s, _ in ordered]
+    reach, furthest = [], None
+    for _, end in ordered:
+        if furthest is None or end > furthest:
+            furthest = end
+        reach.append(furthest)
+    return starts, reach
+
+
+def _overlaps(index, lo, hi):
+    """Does [lo, hi) overlap any indexed range, exactly as `lo < end and
+    hi > start` scanned over all of them would decide?
+
+    The ranges with `start < hi` are `starts[:k]`, and one of them satisfies
+    `end > lo` precisely when the largest end among them does.
+    """
+    starts, reach = index
+    k = bisect.bisect_left(starts, hi)
+    return k > 0 and reach[k - 1] > lo
+
+
 def undefine_functions(bv, ranges, log=None):
     """Remove every function that overlaps any of `ranges`.
 
     Linear sweep happily disassembles RTTI, so these tables usually carry a
     handful of large bogus functions that poison xrefs and the call graph.
     """
+    # Testing every function against every span is quadratic, and a binary
+    # with 23,000 functions over 6,000 metadata spans spends more time here
+    # than in the rest of the plugin put together. Index the spans once.
+    index = _range_index(ranges)
     victims = []
     for f in list(bv.functions):
         # Test the blocks the function actually covers, not start..highest:
@@ -255,8 +295,7 @@ def undefine_functions(bv, ranges, log=None):
             covered = [(r.start, r.end) for r in f.address_ranges]
         except Exception:
             covered = [(b.start, b.end) for b in f.basic_blocks]
-        if any(lo < end and hi > start
-               for lo, hi in covered for start, end in ranges):
+        if any(_overlaps(index, lo, hi) for lo, hi in covered):
             victims.append(f)
     for f in victims:
         if log:
