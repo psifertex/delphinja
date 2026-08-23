@@ -36,6 +36,8 @@ def _probe(bv):
     candidate, and Delphi emits the System unit's VMTs at the very start of
     the code section -- so a real Delphi binary answers almost immediately.
     """
+    if signatures.fpc_version(bv) is not None:
+        return True                 # Free Pascal: no VMTs, but libraries to load
     md = A.DelphiMetadata(bv)
     # Every era's header size, not just the 76-byte one: a Delphi 2009 binary
     # puts its self-pointer 88 bytes back, and probing only for 76 answers
@@ -81,7 +83,10 @@ def parse_info(debug_info, bv, debug_file, progress):
         t_scan = time.time() - t0
         if cancelled[0]:
             return False
-        signatures.register_for(getattr(md.layout, "header_size", None), TAG)
+        # Only on evidence -- see the note in workflow.py.
+        if md.vmts:
+            signatures.register_for(md.layout.header_size, TAG)
+        signatures.register_fpc(bv, TAG)
 
         t0 = time.time()
         sink = sinks.DebugInfoSink(debug_info, bv, md)

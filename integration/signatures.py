@@ -55,10 +55,74 @@ ERAS = {
 _registered = set()
 
 
+# Free Pascal ships its own runtime, unrelated to Delphi's, so it needs its own
+# libraries and its own detection. Unlike Delphi -- where nothing cheaply
+# readable gives the version -- an FPC binary states it outright, so this
+# selects one library rather than an era's worth.
+#
+# The gate is a section named .CRT, which every one of the 41 FPC binaries in
+# the corpus has and no Delphi binary does. That keeps the cost of asking "is
+# this Free Pascal?" to a single section lookup on everything else.
+FPC_SERIES = {
+    "2.6": "2.6.4", "2.7": "2.6.4",          # 2.7.x is the 2.8 development line
+    "3.0": "3.0.4", "3.1": "3.0.4",          # 3.1.x is the 3.2 development line
+    "3.2": "3.2.2", "3.3": "3.2.2",
+}
+FPC_DEFAULT = "3.2.2"       # still the current stable release
+_FPC_SCAN_LIMIT = 64        # version strings appear early; do not sweep the image
+
+
 def library(tag):
     """Absolute path of the library for a knowledge base tag, if it ships."""
     path = os.path.join(_DIR, "delphi-rtl-%s.warp" % tag)
     return path if os.path.exists(path) else None
+
+
+def fpc_library(tag):
+    """Absolute path of a Free Pascal library tag like "3.2.2-win32"."""
+    path = os.path.join(_DIR, "fpc-rtl-%s.warp" % tag)
+    return path if os.path.exists(path) else None
+
+
+def fpc_version(bv):
+    """The FPC release that built this binary, or None if it is not FPC.
+
+    Returns the version as written in the binary, e.g. "3.2.2".
+    """
+    try:
+        if bv.get_section_by_name(".CRT") is None:
+            return None
+    except Exception:
+        return None
+    import re
+    pattern = re.compile(rb"FPC[ /-](\d+)\.(\d+)\.(\d+)")
+    addr, seen = bv.start, 0
+    while addr is not None and seen < _FPC_SCAN_LIMIT:
+        addr = bv.find_next_data(addr, b"FPC")
+        if addr is None:
+            break
+        m = pattern.match(bv.read(addr, 20) or b"")
+        if m:
+            return b".".join(m.groups()).decode()
+        addr += 1
+        seen += 1
+    return None
+
+
+def fpc_tags(bv):
+    """The Free Pascal library tags to load for this binary, if any."""
+    version = fpc_version(bv)
+    if version is None:
+        return []
+    series = ".".join(version.split(".")[:2])
+    release = FPC_SERIES.get(series, FPC_DEFAULT)
+    arch = "win64" if bv.arch is not None and bv.arch.address_size == 8 else "win32"
+    tag = "%s-%s" % (release, arch)
+    if fpc_library(tag):
+        return [tag]
+    # No library for that architecture; the other one cannot match at all.
+    bn.log_debug("no Free Pascal signature library for %s" % tag, "Delphinja")
+    return []
 
 
 def bundled():
@@ -74,7 +138,12 @@ def tags_for(header_size):
     return ERAS.get(header_size, [])
 
 
-def register(tags, tag="Delphinja"):
+def register_fpc(bv, tag="Delphinja"):
+    """Register the Free Pascal library matching this binary, if any."""
+    return register(fpc_tags(bv), tag, kind="fpc")
+
+
+def register(tags, tag="Delphinja", kind="delphi"):
     """Register the named libraries, skipping any already registered.
 
     Returns the tags newly registered. Failure must not stop analysis: WARP is
@@ -82,7 +151,8 @@ def register(tags, tag="Delphinja"):
     importable at all, and signatures are an enhancement rather than a
     prerequisite for anything else here.
     """
-    wanted = [t for t in tags if t not in _registered and library(t)]
+    find = fpc_library if kind == "fpc" else library
+    wanted = [t for t in tags if (kind, t) not in _registered and find(t)]
     if not wanted:
         return []
     # Checked here rather than at import: the setting is registered during
@@ -93,21 +163,23 @@ def register(tags, tag="Delphinja"):
         from binaryninja import warp
     except ImportError:
         bn.log_warn("WARP is unavailable; bundled signatures not registered", tag)
-        _registered.update(tags)          # do not retry on every binary
+        _registered.update((kind, t) for t in tags)   # do not retry per binary
         return []
     done = []
     for t in wanted:
         try:
-            container = warp.WarpContainer.add("Delphinja delphi-rtl-%s" % t)
-            container.add_source(library(t))
+            stem = ("fpc-rtl-%s" if kind == "fpc" else "delphi-rtl-%s") % t
+            container = warp.WarpContainer.add("Delphinja %s" % stem)
+            container.add_source(find(t))
         except Exception as exc:
             bn.log_error("could not register signature library %s: %s" % (t, exc), tag)
             continue
-        _registered.add(t)
+        _registered.add((kind, t))
         done.append(t)
     if done:
-        bn.log_info("registered Delphi signature librar%s %s"
-                    % ("y" if len(done) == 1 else "ies", ", ".join(done)), tag)
+        bn.log_info("registered %s signature librar%s %s"
+                    % ("Free Pascal" if kind == "fpc" else "Delphi",
+                       "y" if len(done) == 1 else "ies", ", ".join(done)), tag)
     return done
 
 

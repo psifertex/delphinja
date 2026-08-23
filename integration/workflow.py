@@ -54,6 +54,11 @@ def probe(bv):
     binary puts its self-pointer 88 bytes back, and probing only for 76 answers
     "not Delphi" for the entire modern range.
     """
+    # Free Pascal binaries carry no Delphi VMTs, so the scan below would reject
+    # them -- but they still have signature libraries to load. One section
+    # lookup settles it, so ask first.
+    if signatures.fpc_version(bv) is not None:
+        return True
     md = A.DelphiMetadata(bv)
     sizes = P.header_sizes()
     for start, end in md._code_ranges:
@@ -85,6 +90,10 @@ def _eligible(activity, context):
 def _recover(context):
     bv = context.view
     try:
+        # Independent of any Delphi metadata, and cheap, so do it before the
+        # scan rather than after: a Free Pascal binary has nothing for the
+        # scan to find but still wants its runtime library loaded.
+        signatures.register_fpc(bv, TAG)
         t0 = time.time()
         md = A.DelphiMetadata(bv).scan()
         t_scan = time.time() - t0
@@ -93,7 +102,11 @@ def _recover(context):
         # matches, which is the point: registering every library would leave
         # the matcher choosing between versions and declining the ambiguous
         # ones.
-        signatures.register_for(getattr(md.layout, "header_size", None), TAG)
+        # Only on evidence: with no VMTs the layout is a default, not a
+        # detection, and registering an era's worth of Delphi libraries off it
+        # would load eight wrong libraries onto every Free Pascal binary.
+        if md.vmts:
+            signatures.register_for(md.layout.header_size, TAG)
         t0 = time.time()
         sink = sinks.AutoSink(bv, md)
         stats = A.Applier(md, {"undefine": False}, sink=sink).run()

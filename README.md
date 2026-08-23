@@ -13,7 +13,9 @@ Binary Ninja workflow for Delphi and the Visual Component Library (VCL). Include
   strips the symbols from. These ship with the plugin and are loaded on
   demand -- only the libraries matching the binary's Delphi era, once it has
   been detected -- so nothing has to be copied into a signature directory.
-Delphi 2 through 10.x are supported. The VMT layout is detected per binary.
+Delphi 2 through 10.x are supported, and Free Pascal 2.6 through 3.2. The VMT
+layout is detected per binary, and every offset is derived from it rather than
+written down, which is what lets one build read every era.
 
 ## Layout
 
