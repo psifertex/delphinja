@@ -40,21 +40,6 @@ import binaryninja as bn
 _DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                     "signatures")
 
-# Virtual method table header size -> the knowledge base tags whose libraries
-# can plausibly match. The header size is what the decoder already detects per
-# binary, and it separates the eras cleanly: 64 bytes is Delphi 2, 76 covers
-# Delphi 3 through 2007, and 88 is Delphi 2009 and later.
-#
-# This narrows the field; it does not pick a single version, because nothing
-# cheaply readable in the binary identifies one. The linker version is 2.25
-# across the whole range and the vendor string only tells Borland-era from
-# Embarcadero-era, which is the same split the header size already gives.
-ERAS = {
-    64: ["2"],
-    76: ["3", "4", "5", "6", "7", "2005", "2006", "2007"],
-    88: ["2009", "2010", "2011", "2012", "2013", "2014"],
-}
-
 _registered = set()
 
 
@@ -162,9 +147,10 @@ def bundled():
                   if f.endswith(".warp"))
 
 
-def tags_for(header_size):
-    """Knowledge base tags worth loading for a binary with this VMT header."""
-    return ERAS.get(header_size, [])
+def delphi_tags():
+    """Every Delphi knowledge base tag that ships a library."""
+    return [os.path.basename(p)[len("delphi-rtl-"):-len(".warp")]
+            for p in bundled() if os.path.basename(p).startswith("delphi-rtl-")]
 
 
 def register_fpc(bv, tag="Delphinja"):
@@ -212,17 +198,6 @@ def register(tags, tag="Delphinja", kind="delphi"):
     return done
 
 
-def register_for(header_size, tag="Delphinja"):
-    """Register the libraries appropriate to a detected VMT header size."""
-    tags = tags_for(header_size)
-    if not tags:
-        bn.log_debug("no signature libraries for VMT header size %r" % (header_size,), tag)
-        return []
-    return register(tags, tag)
-
-
-def register_all(tag="Delphinja"):
-    """Register every bundled library. For comparison runs, not for normal use."""
-    all_tags = [os.path.basename(p)[len("delphi-rtl-"):-len(".warp")]
-                for p in bundled()]
-    return register(all_tags, tag)
+def register_delphi(tag="Delphinja"):
+    """Register every bundled Delphi library."""
+    return register(delphi_tags(), tag)

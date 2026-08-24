@@ -99,11 +99,10 @@ def _recover(context):
         # matches, which is the point: registering every library would leave
         # the matcher choosing between versions and declining the ambiguous
         # ones.
-        # Only on evidence: with no VMTs the layout is a default, not a
-        # detection, and registering an era's worth of Delphi libraries off it
-        # would load eight wrong libraries onto every Free Pascal binary.
+        # Only on evidence: with no VMTs this is not a Delphi binary, and its
+        # libraries cannot match.
         if md.vmts:
-            signatures.register_for(md.layout.header_size, TAG)
+            signatures.register_delphi(TAG)
         t0 = time.time()
         sink = sinks.AutoSink(bv, md)
         stats = A.Applier(md, {"undefine": False}, sink=sink).run()
