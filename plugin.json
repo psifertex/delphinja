@@ -12,7 +12,7 @@
   "longdescription": "Delphi writes its published-symbol metadata -- class names, published method and field names, message handler tables, property tables and full type information -- directly into the code section, where linear sweep disassembles it as garbage functions and the names inside it never reach analysis.\n\nThis plugin decodes those tables and applies what they carry: class structs with real field names, enumerations, published method names, a typed `Self` parameter, and message handler tables. It removes the bogus functions covering the metadata, demangles Borland symbol names, and registers WARP signature libraries built from the Delphi runtime so that statically linked RTL and VCL functions are named and typed as well.\n\nDelphi 2 through 10.x are supported; the VMT layout is detected per binary rather than assumed.",
   "license": {
     "name": "MIT",
-    "text": "Copyright (c) <year> <copyright holders>\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
+    "text": "Copyright (c) 2026 Jordan Wiens\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
   },
   "platforms": [
     "Darwin",
@@ -22,6 +22,6 @@
   "installinstructions": {},
   "dependencies": {},
   "version": "1.0.0",
-  "author": "Vector 35 Inc",
-  "minimumbinaryninjaversion": 9696
+  "author": "Jordan Wiens",
+  "minimumbinaryninjaversion": 10515
 }

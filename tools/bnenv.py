@@ -13,17 +13,37 @@ Import this before `binaryninja`.
 import json
 import os
 import shutil
+import sys
+import tempfile
 
-REAL = os.path.expanduser("~/Library/Application Support/Binary Ninja")
+
+def real_user_directory():
+    """Binary Ninja's own user directory for this platform.
+
+    Resolved here rather than asked of the API, because the point of this
+    module is to redirect BN_USER_DIRECTORY *before* binaryninja is imported.
+    """
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Application Support/Binary Ninja")
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or os.path.join(
+            os.path.expanduser("~"), "AppData", "Roaming")
+        return os.path.join(base, "Binary Ninja")
+    return os.path.expanduser("~/.binaryninja")
 
 
-def scratch_user_directory(default="/tmp/bn-build-home"):
+REAL = real_user_directory()
+
+
+def scratch_user_directory(default=None):
     """Point BN_USER_DIRECTORY at a scratch directory and seed it.
 
     Copies the licence and carries over just the enterprise server URL; not
     the whole settings file, or the run inherits whatever analysis settings
     happen to be set interactively.
     """
+    if default is None:
+        default = os.path.join(tempfile.gettempdir(), "bn-build-home")
     os.environ.setdefault("BN_USER_DIRECTORY", default)
     scratch = os.environ["BN_USER_DIRECTORY"]
     for sub in ("", "plugins", "signatures"):
