@@ -20,3 +20,7 @@ __pycache__/
 # the material lives with the project rather than in a temp directory. Not
 # ours to redistribute, and inputs rather than deliverables.
 fpc-research/
+
+# Local experiments: work that is kept for reference but is not part of the
+# plugin.
+experiments/
