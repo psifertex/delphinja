@@ -24,3 +24,5 @@ fpc-research/
 # Local experiments: work that is kept for reference but is not part of the
 # plugin.
 experiments/
+
+.DS_Store
