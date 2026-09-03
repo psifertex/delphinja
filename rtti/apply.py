@@ -27,12 +27,13 @@ def string_var_name(literal):
     The text is what a reader is looking for, so it goes in the name; two
     literals holding the same words share a name, which is what the binary
     itself says about them.  Text that survives sanitizing as nothing but
-    separators names itself by address instead.
+    separators names itself by address instead.  The Delphi type leads, so the
+    name says which of the two string types the constant is.
     """
     label = sanitize(literal.text[:STRING_NAME_CHARS].strip(), "")
     if not label.strip("_."):
         label = "%x" % literal.addr
-    return "AnsiString_" + label
+    return literal.kind + "_" + label
 
 
 def sanitize(name, fallback="anon"):
@@ -141,7 +142,7 @@ class DelphiMetadata(object):
                 out.append((s, e, "%s %s" % (label, v.name)))
         if strings:
             for literal in self.strings.values():
-                out.append((literal.addr, literal.end, "AnsiString"))
+                out.append((literal.addr, literal.end, literal.kind))
         return sorted(out)
 
     def regions(self, gap=0x40, strings=True):
@@ -547,24 +548,36 @@ class TypeFactory(object):
         """A method table: `count` consecutive pointers to code."""
         return Type.array(self.code_pointer(), count)
 
-    def ansistring_type(self, length):
-        """A compiler-emitted AnsiString constant of `length` characters.
+    def string_literal_type(self, literal):
+        """A compiler-emitted string constant, header to terminator.
 
         The record is the whole literal -- header, characters and terminator
         -- so one data variable of this type covers every byte the compiler
         reserved, and nothing is left over for the sweep to read as code.  The
         character array carries the terminator, which is what makes it a C
         string the UI renders as text.
+
+        Three shapes exist and each gets its own name, because the length
+        alone no longer fixes the width: `TAnsiStringLiteral_N` is the 8-byte
+        header, `TAnsiStringLiteral12_N` the 12-byte one Delphi 2009 gave the
+        same type, and `TUnicodeStringLiteral_N` the 12-byte header over
+        two-byte characters.
         """
-        name = "%sTAnsiStringLiteral_%d" % (self.prefix, length)
-        width = 9 + length
+        length, elem = literal.length, literal.elem_size
+        header = literal.header_size
+        suffix = "12" if header == 12 and elem == 1 else ""
+        name = "%sT%sLiteral%s_%d" % (self.prefix, literal.kind, suffix, length)
+        width = header + (length + 1) * elem
         if name not in self.defined:
             sb = StructureBuilder.create()
             sb.packed = True
-            sb.add_member_at_offset("RefCount", Type.int(4, True), 0)
-            sb.add_member_at_offset("Length", Type.int(4, True), 4)
-            sb.add_member_at_offset("Data", Type.array(Type.char(), length + 1),
-                                    8)
+            if header == 12:
+                sb.add_member_at_offset("CodePage", Type.int(2, False), 0)
+                sb.add_member_at_offset("ElemSize", Type.int(2, False), 2)
+            sb.add_member_at_offset("RefCount", Type.int(4, True), header - 8)
+            sb.add_member_at_offset("Length", Type.int(4, True), header - 4)
+            char = Type.wide_char(2) if elem == 2 else Type.char()
+            sb.add_member_at_offset("Data", Type.array(char, length + 1), header)
             sb.width = width
             self.sink.add_type(name, Type.structure_type(sb))
             self.defined[name] = True
@@ -838,14 +851,14 @@ class Applier(object):
             self.stats["comments"] += 1
 
     def _apply_string(self, literal):
-        """Declare one AnsiString constant as the record it is.
+        """Declare one string constant as the record it is.
 
         Every byte the compiler reserved is inside the declaration, header and
         terminator included, which is what keeps the sweep from reading any of
         it as an instruction.
         """
         before = self.stats["data_vars"]
-        self._data(literal.addr, self.factory.ansistring_type(literal.length),
+        self._data(literal.addr, self.factory.string_literal_type(literal),
                    string_var_name(literal))
         self.stats["strings"] += self.stats["data_vars"] - before
 

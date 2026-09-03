@@ -1,4 +1,4 @@
-"""Pure parser for Delphi (2..2007/x86, non-Unicode) RTTI, VMT and metadata tables.
+"""Pure parser for Delphi (2..13/x86) RTTI, VMT and metadata tables.
 
 Nothing in here imports Binary Ninja.  The whole parser talks to the binary
 through a `Reader`, so the same code runs headless against a raw PE or inside
@@ -721,46 +721,75 @@ def scan(r, start, end, progress=None):
     return vmts, typeinfos
 
 
-# -------------------------------------------------------- AnsiString literals
+# ------------------------------------------------------------ string literals
 
 #: The refcount every compiler-emitted string constant carries.
 STRING_REFCOUNT = 0xFFFFFFFF
 
-#: Longest literal accepted. Delphi embeds whole HTML templates and SQL
-#: statements in the code section, so the cap is generous; it exists only to
-#: keep a length read out of unrelated bytes from claiming the rest of the
-#: section.
+#: Longest literal accepted, in characters. Delphi embeds whole HTML templates
+#: and SQL statements in the code section, so the cap is generous; it exists
+#: only to keep a length read out of unrelated bytes from claiming the rest of
+#: the section.
 MAX_STRING_LENGTH = 0x10000
 
 #: The control characters a string constant plausibly contains.
 STRING_CONTROLS = (0x09, 0x0A, 0x0D)
 
+#: UnicodeString's code page. It is fixed, so it and a two-byte element size
+#: imply each other.
+CP_UTF16 = 1200
 
-class AnsiString(object):
-    """One AnsiString constant the compiler emitted into the code section."""
 
-    __slots__ = ("addr", "length", "raw")
+class StringLiteral(object):
+    """One string constant the compiler emitted into the code section.
 
-    def __init__(self, addr, length, raw):
-        self.addr = addr                  # the refcount dword
-        self.length = length
+    Two header shapes carry these. Through Delphi 2007 the header is a
+    refcount and a length; from Delphi 2009 a code page and an element size
+    precede those two, `length` counts characters rather than bytes, and the
+    terminator is one element wide. `addr` is the first header byte of
+    whichever shape this record has, so the record runs [addr, end).
+    """
+
+    __slots__ = ("addr", "length", "raw", "header_size", "elem_size",
+                 "code_page")
+
+    def __init__(self, addr, length, raw, header_size=8, elem_size=1,
+                 code_page=None):
+        self.addr = addr                  # the first header byte
+        self.length = length              # characters, not bytes
         self.raw = raw                    # characters, without the terminator
+        self.header_size = header_size
+        self.elem_size = elem_size
+        self.code_page = code_page        # None where the header has no field
 
     @property
     def body(self):
-        return self.addr + 8
+        """The first character: the address the compiler references."""
+        return self.addr + self.header_size
 
     @property
     def end(self):
-        """One past the NUL terminator."""
-        return self.addr + 9 + self.length
+        """One past the terminator."""
+        return self.body + (self.length + 1) * self.elem_size
 
     @property
     def text(self):
+        if self.elem_size == 2:
+            return self.raw.decode("utf-16-le")
         return self.raw.decode("latin-1")
 
+    @property
+    def kind(self):
+        """The Delphi type of this constant.
+
+        The element size is the discriminator the RTL itself uses; the code
+        page distinguishes the one-byte types from each other and is left on
+        the record for callers that want it.
+        """
+        return "UnicodeString" if self.elem_size == 2 else "AnsiString"
+
     def __repr__(self):
-        return "<AnsiString %08x %r>" % (self.addr, self.text[:32])
+        return "<%s %08x %r>" % (self.kind, self.addr, self.text[:32])
 
 
 def is_string_text(raw):
@@ -775,15 +804,59 @@ def is_string_text(raw):
     return all(c >= 0x20 or c in STRING_CONTROLS for c in raw)
 
 
+def is_wide_string_text(raw):
+    """The same predicate over UTF-16LE code points.
+
+    Decoding is itself a check: a body holding a lone surrogate is not text,
+    and rejecting it costs nothing.
+    """
+    try:
+        text = raw.decode("utf-16-le")
+    except (UnicodeDecodeError, ValueError):
+        return False
+    return all(ord(c) >= 0x20 or ord(c) in STRING_CONTROLS for c in text)
+
+
+def parse_strrec(r, addr, limit=None):
+    """Parse the Delphi 2009 string constant anchored on the refcount at `addr`.
+
+    A code page and an element size sit in front of the refcount, so the record
+    starts four bytes before the anchor.  Everything after the length is scaled
+    by the element size: the body is `length` elements and the terminator is
+    one more.  Element size and code page have to agree -- a two-byte element
+    is a UnicodeString and its code page is 1200, and nothing else is -- which
+    is what keeps a pre-2009 record whose two preceding bytes happen to read
+    `01 00` from parsing as this shape.
+    """
+    if r.u32(addr) != STRING_REFCOUNT:
+        return None
+    code_page, elem = r.u16(addr - 4), r.u16(addr - 2)
+    if elem not in (1, 2) or code_page is None:
+        return None
+    if (code_page == CP_UTF16) != (elem == 2):
+        return None
+    length = r.u32(addr + 4)
+    if length is None or not (1 <= length <= MAX_STRING_LENGTH):
+        return None
+    size = (length + 1) * elem
+    if limit is not None and addr + 8 + size > limit:
+        return None
+    raw = r.bytes(addr + 8, size)
+    if len(raw) != size or any(raw[length * elem:]):
+        return None
+    body = bytes(raw[:length * elem])
+    if not (is_wide_string_text(body) if elem == 2 else is_string_text(body)):
+        return None
+    return StringLiteral(addr - 4, length, body, 12, elem, code_page)
+
+
 def parse_ansistring(r, addr, limit=None):
-    """Parse the AnsiString constant whose header begins at `addr`.
+    """Parse the pre-2009 AnsiString constant whose header begins at `addr`.
 
     The layout is a refcount of -1, a 32-bit length, that many characters and
     a NUL terminator.  All three header facts are required: the refcount is
     exact, the length must be in range and leave the whole literal inside
-    `limit`, and the byte the length points at must be the terminator.  A
-    Delphi 2009 UnicodeString stores two bytes per character behind the same
-    refcount, so the terminator test rejects it rather than mistyping it.
+    `limit`, and the byte the length points at must be the terminator.
     """
     if r.u32(addr) != STRING_REFCOUNT:
         return None
@@ -797,15 +870,36 @@ def parse_ansistring(r, addr, limit=None):
         return None
     if r.u8(addr + 8 + length) != 0:
         return None
-    return AnsiString(addr, length, bytes(raw))
+    return StringLiteral(addr, length, bytes(raw))
+
+
+def parse_string(r, addr, limit=None):
+    """Parse the string constant anchored on the refcount dword at `addr`.
+
+    Both header shapes are tried and the record decides which one it is, so no
+    compiler version has to be guessed -- which matters, because version
+    detection abstains on a quarter of binaries and being wrong either way
+    costs every literal in the file.
+
+    The 12-byte shape goes first because the shapes are not symmetric.  The
+    8-byte parse of a one-character UnicodeString succeeds by coincidence --
+    the character's zero high byte reads as the terminator -- yielding the
+    right text with the wrong type and a span two bytes short, so trying the
+    8-byte shape first would keep mis-typing exactly those records.  The
+    reverse accident does not happen: the 12-byte parse accepts nothing in any
+    pre-2009 binary of the corpus, and its element size and code page have to
+    corroborate each other.
+    """
+    return parse_strrec(r, addr, limit) or parse_ansistring(r, addr, limit)
 
 
 def scan_strings(r, start, end, align=4):
-    """Yield every AnsiString constant in [start, end), in ascending order.
+    """Yield every string constant in [start, end), in ascending order.
 
-    The refcount is the anchor. The compiler emits these records dword
+    The refcount is the anchor, and both header shapes hang off it, so one
+    scan finds the candidates for both. The compiler emits these records dword
     aligned, which makes it one aligned word compare per four bytes to find
-    every candidate, and `parse_ansistring` decides which candidates are real.
+    every candidate, and `parse_string` decides which candidates are real.
     Blocks are pulled out and walked as machine arrays for the same reason
     `self_pointers` does it: asking the reader per address costs more than the
     comparison.
@@ -823,7 +917,7 @@ def scan_strings(r, start, end, align=4):
         else:
             addrs = range(base, stop, align)
         for addr in addrs:
-            literal = parse_ansistring(r, addr, end)
+            literal = parse_string(r, addr, end)
             if literal is not None:
                 yield literal
 
