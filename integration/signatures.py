@@ -32,7 +32,6 @@ selection below.
 """
 
 import os
-import queue
 import re
 
 import binaryninja as bn
@@ -105,22 +104,12 @@ def _first_match(bv, pattern):
     """The bytes of the first match of `pattern`, or None.
 
     `search` runs the scan on a worker thread and publishes matches on a
-    queue; `limit=1` stops the scan at the first one. The generator wrapping
-    that queue polls it on a 0.1s timeout, though, so *iterating it to
-    exhaustion* costs a flat 100ms however quickly the scan finished -- which
-    on a binary with no match is the entire cost. Waiting on the worker
-    instead reports the same answer in the time the scan actually took.
+    queue; `limit=1` stops the scan at the first one. The generator is taken
+    exactly one step: an exhausted search generator does not survive a second
+    `next`.
     """
-    matches = bv.search(pattern, limit=1)
-    thread = getattr(matches, "thread", None)
-    if thread is None:                  # not the generator we expect; iterate
-        found = next(iter(matches), None)
-        return bytes(found[1]) if found else None
-    thread.join()
-    try:
-        return bytes(matches.results.get_nowait()[1])
-    except queue.Empty:
-        return None
+    found = next(iter(bv.search(pattern, limit=1)), None)
+    return bytes(found[1]) if found else None
 
 
 def fpc_tags(bv):
