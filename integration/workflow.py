@@ -196,6 +196,12 @@ def register():
                     {"type": "setting", "identifier": CLEANUP, "value": True},
                 ],
             },
+            # This activity sets calling conventions and creates the Self
+            # variables, so it changes the view no less than recovery does and
+            # needs the same downstream update.  Without it the writes land but
+            # nothing re-renders: the types are correct in the database and
+            # appear the moment anything else forces an analysis update.
+            "dependencies": {"downstream": ["core.module.update"]},
         }),
         action=_cleanup))
 
