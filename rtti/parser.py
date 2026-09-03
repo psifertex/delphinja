@@ -721,6 +721,113 @@ def scan(r, start, end, progress=None):
     return vmts, typeinfos
 
 
+# -------------------------------------------------------- AnsiString literals
+
+#: The refcount every compiler-emitted string constant carries.
+STRING_REFCOUNT = 0xFFFFFFFF
+
+#: Longest literal accepted. Delphi embeds whole HTML templates and SQL
+#: statements in the code section, so the cap is generous; it exists only to
+#: keep a length read out of unrelated bytes from claiming the rest of the
+#: section.
+MAX_STRING_LENGTH = 0x10000
+
+#: The control characters a string constant plausibly contains.
+STRING_CONTROLS = (0x09, 0x0A, 0x0D)
+
+
+class AnsiString(object):
+    """One AnsiString constant the compiler emitted into the code section."""
+
+    __slots__ = ("addr", "length", "raw")
+
+    def __init__(self, addr, length, raw):
+        self.addr = addr                  # the refcount dword
+        self.length = length
+        self.raw = raw                    # characters, without the terminator
+
+    @property
+    def body(self):
+        return self.addr + 8
+
+    @property
+    def end(self):
+        """One past the NUL terminator."""
+        return self.addr + 9 + self.length
+
+    @property
+    def text(self):
+        return self.raw.decode("latin-1")
+
+    def __repr__(self):
+        return "<AnsiString %08x %r>" % (self.addr, self.text[:32])
+
+
+def is_string_text(raw):
+    """Printable Latin-1, tab, newline and carriage return only.
+
+    The header alone is nearly self-checking, but "nearly" is not enough when
+    a false positive declares instructions to be data. Requiring the body to
+    read as text costs the handful of literals holding a binary file magic and
+    buys rejection of every run of code bytes that happens to sit behind four
+    0xFF bytes and a plausible length.
+    """
+    return all(c >= 0x20 or c in STRING_CONTROLS for c in raw)
+
+
+def parse_ansistring(r, addr, limit=None):
+    """Parse the AnsiString constant whose header begins at `addr`.
+
+    The layout is a refcount of -1, a 32-bit length, that many characters and
+    a NUL terminator.  All three header facts are required: the refcount is
+    exact, the length must be in range and leave the whole literal inside
+    `limit`, and the byte the length points at must be the terminator.  A
+    Delphi 2009 UnicodeString stores two bytes per character behind the same
+    refcount, so the terminator test rejects it rather than mistyping it.
+    """
+    if r.u32(addr) != STRING_REFCOUNT:
+        return None
+    length = r.u32(addr + 4)
+    if length is None or not (1 <= length <= MAX_STRING_LENGTH):
+        return None
+    if limit is not None and addr + 9 + length > limit:
+        return None
+    raw = r.bytes(addr + 8, length)
+    if len(raw) != length or not is_string_text(raw):
+        return None
+    if r.u8(addr + 8 + length) != 0:
+        return None
+    return AnsiString(addr, length, bytes(raw))
+
+
+def scan_strings(r, start, end, align=4):
+    """Yield every AnsiString constant in [start, end), in ascending order.
+
+    The refcount is the anchor. The compiler emits these records dword
+    aligned, which makes it one aligned word compare per four bytes to find
+    every candidate, and `parse_ansistring` decides which candidates are real.
+    Blocks are pulled out and walked as machine arrays for the same reason
+    `self_pointers` does it: asking the reader per address costs more than the
+    comparison.
+    """
+    first = start + -start % align
+    block = max(_CHUNK, align)
+    for base in range(first, end, block):
+        stop = min(base + block, end)
+        data = r.bytes(base, stop - base)
+        if len(data) == stop - base and align == 4:
+            count = len(data) // 4
+            words = memoryview(data)[:4 * count].cast("I")
+            addrs = [base + 4 * i for i, word in enumerate(words)
+                     if word == STRING_REFCOUNT]
+        else:
+            addrs = range(base, stop, align)
+        for addr in addrs:
+            literal = parse_ansistring(r, addr, end)
+            if literal is not None:
+                yield literal
+
+
 def cluster(addrs, gap=0x200):
     """Group sorted (start, end) spans that sit within `gap` bytes."""
     spans = sorted(addrs)

@@ -17,6 +17,24 @@ TAG = "delphinja"
 _BAD_CHARS = re.compile(r"[^A-Za-z0-9_.$]")
 
 
+#: How much of a literal's text goes into its data variable's name.
+STRING_NAME_CHARS = 24
+
+
+def string_var_name(literal):
+    """A readable, address-free name for a string constant.
+
+    The text is what a reader is looking for, so it goes in the name; two
+    literals holding the same words share a name, which is what the binary
+    itself says about them.  Text that survives sanitizing as nothing but
+    separators names itself by address instead.
+    """
+    label = sanitize(literal.text[:STRING_NAME_CHARS].strip(), "")
+    if not label.strip("_."):
+        label = "%x" % literal.addr
+    return "AnsiString_" + label
+
+
 def sanitize(name, fallback="anon"):
     """Delphi emits compiler-generated names like '.74' for anonymous types."""
     if not name:
@@ -68,6 +86,7 @@ class DelphiMetadata(object):
         self.layout = self.reader.layout
         self.vmts = {}
         self.typeinfos = {}
+        self.strings = {}
         self._children = None
         self._interfaces = None
         self._uregions = None
@@ -93,6 +112,8 @@ class DelphiMetadata(object):
             v, t = P.scan(self.reader, start, end, progress)
             self.vmts.update(v)
             self.typeinfos.update(t)
+            for literal in P.scan_strings(self.reader, start, end):
+                self.strings[literal.addr] = literal
             self._children = None
             self._interfaces = None
             self._uregions = None
@@ -102,8 +123,14 @@ class DelphiMetadata(object):
 
     # -- derived views ----------------------------------------------------
 
-    def spans(self):
-        """Every (start, end, label) byte range that metadata occupies."""
+    def spans(self, strings=True):
+        """Every (start, end, label) byte range that metadata occupies.
+
+        String constants are metadata in the sense that matters here: they sit
+        in the code section, they are not instructions, and a function
+        overlapping one is bogus.  `strings=False` restricts the answer to the
+        RTTI records, which is what unit inference reasons about.
+        """
         out = []
         for ti in self.typeinfos.values():
             start = ti.ptr_addr if ti.ptr_addr is not None else ti.addr
@@ -112,11 +139,14 @@ class DelphiMetadata(object):
             out.append((v.header, v.vtable_end, "VMT %s" % v.name))
             for s, e, label in v.regions:
                 out.append((s, e, "%s %s" % (label, v.name)))
+        if strings:
+            for literal in self.strings.values():
+                out.append((literal.addr, literal.end, "AnsiString"))
         return sorted(out)
 
-    def regions(self, gap=0x40):
+    def regions(self, gap=0x40, strings=True):
         """Coalesced metadata regions, the answer to 'where else is this?'."""
-        return P.cluster([(s, e) for s, e, _ in self.spans()], gap)
+        return P.cluster([(s, e) for s, e, _ in self.spans(strings)], gap)
 
     def typeinfo_by_ptr(self, pptypeinfo):
         """PPTypeInfo cell -> parsed TypeInfo."""
@@ -168,8 +198,14 @@ class DelphiMetadata(object):
         return self._class_ti.get(getattr(vmt, "addr", None))
 
     def _unit_regions(self):
+        """The RTTI regions only.
+
+        A string constant declares no unit, and the compiler emits literals
+        between the tables, so counting them here would bridge two units'
+        metadata into one region and turn single-unit evidence into mixed.
+        """
         if self._uregions is None:
-            self._uregions = self.regions(self.UNIT_REGION_GAP)
+            self._uregions = self.regions(self.UNIT_REGION_GAP, strings=False)
         return self._uregions
 
     def _unit_evidence(self):
@@ -511,6 +547,31 @@ class TypeFactory(object):
         """A method table: `count` consecutive pointers to code."""
         return Type.array(self.code_pointer(), count)
 
+    def ansistring_type(self, length):
+        """A compiler-emitted AnsiString constant of `length` characters.
+
+        The record is the whole literal -- header, characters and terminator
+        -- so one data variable of this type covers every byte the compiler
+        reserved, and nothing is left over for the sweep to read as code.  The
+        character array carries the terminator, which is what makes it a C
+        string the UI renders as text.
+        """
+        name = "%sTAnsiStringLiteral_%d" % (self.prefix, length)
+        width = 9 + length
+        if name not in self.defined:
+            sb = StructureBuilder.create()
+            sb.packed = True
+            sb.add_member_at_offset("RefCount", Type.int(4, True), 0)
+            sb.add_member_at_offset("Length", Type.int(4, True), 4)
+            sb.add_member_at_offset("Data", Type.array(Type.char(), length + 1),
+                                    8)
+            sb.width = width
+            self.sink.add_type(name, Type.structure_type(sb))
+            self.defined[name] = True
+            self.structs += 1
+        return Type.named_type_reference(
+            NamedTypeReferenceClass.StructNamedTypeClass, name, width=width)
+
     INTF_ENTRY_SIZE = 28
 
     def _interface_entry_type(self):
@@ -672,7 +733,7 @@ class Applier(object):
         self.stats = {"functions_removed": 0, "functions_named": 0,
                       "functions_created": 0, "data_vars": 0,
                       "comments": 0, "enums": 0, "structs": 0,
-                      "self_typed": 0, "name_conflicts": 0}
+                      "self_typed": 0, "name_conflicts": 0, "strings": 0}
         self.log_lines = []
 
     def log(self, msg):
@@ -683,8 +744,10 @@ class Applier(object):
 
     def run(self):
         md = self.md
-        self.log("%d VMTs, %d TypeInfo records, %d metadata regions"
-                 % (len(md.vmts), len(md.typeinfos), len(md.regions())))
+        self.log("%d VMTs, %d TypeInfo records, %d string constants, "
+                 "%d metadata regions"
+                 % (len(md.vmts), len(md.typeinfos), len(md.strings),
+                    len(md.regions())))
 
         if self.opt["undefine"]:
             # Exact record spans, never the coalesced regions: the filler
@@ -710,10 +773,12 @@ class Applier(object):
                         self.factory.enum_type(ti)
                     except Exception as exc:
                         bn.log_warn("enum %s: %s" % (ti.name, exc), TAG)
-            self.stats["enums"] = self.factory.enums
-            self.stats["structs"] = self.factory.structs
 
         if self.opt["data_vars"] or self.opt["comments"]:
+            # Literals first: an RTTI record is the stronger evidence, so on
+            # the rare address both claim, the record's declaration wins.
+            for literal in md.strings.values():
+                self._apply_string(literal)
             for ti in md.typeinfos.values():
                 self._apply_typeinfo(ti)
             for vmt in md.vmts.values():
@@ -770,6 +835,18 @@ class Applier(object):
         if self.opt["comments"] and text and self.sink.supports_comments:
             self.sink.set_comment(addr, text)
             self.stats["comments"] += 1
+
+    def _apply_string(self, literal):
+        """Declare one AnsiString constant as the record it is.
+
+        Every byte the compiler reserved is inside the declaration, header and
+        terminator included, which is what keeps the sweep from reading any of
+        it as an instruction.
+        """
+        before = self.stats["data_vars"]
+        self._data(literal.addr, self.factory.ansistring_type(literal.length),
+                   string_var_name(literal))
+        self.stats["strings"] += self.stats["data_vars"] - before
 
     def _apply_typeinfo(self, ti):
         base = self.md.qualified(ti)
@@ -934,6 +1011,11 @@ class Applier(object):
         typed = self.sink.finish()
         self.stats["self_typed"] = typed or getattr(self.sink, "self_typed", 0)
         self.stats["functions_created"] = getattr(self.sink, "created", 0)
+        # Read off the factory rather than the type-definition loop: the
+        # literal record types are built on demand, as the data variables that
+        # use them are declared.
+        self.stats["enums"] = self.factory.enums
+        self.stats["structs"] = self.factory.structs
 
 
 # -------------------------------------------------------------- descriptions
