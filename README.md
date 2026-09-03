@@ -17,6 +17,30 @@ Delphi 2 through 10.x are supported, and Free Pascal 2.6 through 3.2. The VMT
 layout is detected per binary, and every offset is derived from it rather than
 written down, which is what lets one build read every version.
 
+## What it looks like
+
+One event handler in [Dragon UnPACKer 5](https://github.com/elbereth/DragonUnPACKer),
+a GPL archive tool built with Delphi 7, at `0x508cd0`.
+
+Stock Binary Ninja:
+
+![Without the plugin](docs/images/before.png)
+
+With the plugin:
+
+![With the plugin](docs/images/after.png)
+
+Three things changed. The function name and the `TfrmConfig` struct with its
+field names come from the binary's own published method and field tables.
+`Controls::TControl::SetVisible`, `ComCtrls::TCustomTreeView::GetSelected` and
+`ComCtrls::TTreeNode::GetAbsoluteIndex` come from the signature libraries;
+`::` marks a signature match, `.` a name the binary carried. Six identical
+`sub_48ac90` calls and six raw offsets become the tab names the code is
+actually toggling.
+
+Across that binary: **2,491 to 8,299 named functions**, 6 to 4,507 signature
+matches, and 1,226 comments recovered.
+
 ## Layout
 
     rtti/          the decoder and everything that applies what it finds
