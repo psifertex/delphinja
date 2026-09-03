@@ -23,7 +23,6 @@ half a better vantage point than a single pass would have:
 """
 
 import json
-import time
 
 import binaryninja as bn
 from binaryninja import Activity, Workflow
@@ -91,9 +90,7 @@ def _recover(context):
         # scan rather than after: a Free Pascal binary has nothing for the
         # scan to find but still wants its runtime library loaded.
         signatures.register_fpc(bv, TAG)
-        t0 = time.time()
         md = A.DelphiMetadata(bv).scan()
-        t_scan = time.time() - t0
         # Now that the layout is known, load the signature libraries that can
         # plausibly match this binary -- and only those. This runs before WARP
         # matches, which is the point: registering every library would leave
@@ -103,10 +100,8 @@ def _recover(context):
         # libraries cannot match.
         if md.vmts:
             signatures.register_delphi(TAG)
-        t0 = time.time()
         sink = sinks.AutoSink(bv, md)
         stats = A.Applier(md, {"undefine": False}, sink=sink).run()
-        bn.log_info("timing: scan %.2fs apply %.2fs" % (t_scan, time.time() - t0), TAG)
         _state(bv).update(md=md, pending_self=list(sink.pending_self),
                           cc=sink.cc)
         bn.log_info("recovered %d names, %d data variables, %d comments, %d types"
@@ -118,6 +113,7 @@ def _recover(context):
         bn.log_error("recovery failed: %s" % exc, TAG)
 
 
+
 def _cleanup(context):
     bv = context.view
     try:
@@ -125,11 +121,8 @@ def _cleanup(context):
         md = state.get("md")
         if md is None:
             return
-        t0 = time.time()
         spans = [(s, e) for s, e, _ in md.spans()]
-        removed = A.undefine_functions(bv, spans, lambda m: bn.log_info(m, TAG))
-        t_undef = time.time() - t0
-        t0 = time.time()
+        removed = A.undefine_functions(bv, spans, lambda m: bn.log_debug(m, TAG))
         typed = 0
         conventions = 0
         cc = state.get("cc")
@@ -145,7 +138,6 @@ def _cleanup(context):
             if method_cc is not None:
                 conventions += 1
         state.clear()
-        bn.log_info("timing: undefine %.2fs self %.2fs" % (t_undef, time.time() - t0), TAG)
         bn.log_info("removed %d functions over metadata, set the register "
                     "convention on %d methods, typed %d Self parameters"
                     % (len(removed), conventions, typed), TAG)
