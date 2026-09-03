@@ -684,21 +684,22 @@ class NameClaims(object):
         self.claims = {}
         self.conflicts = 0
 
-    def claim(self, addr, name, depth, owner=None):
+    def claim(self, addr, name, depth, owner=None, register_cc=True):
         if not addr:
             return
         best = self.claims.get(addr)
         if best is None or depth < best[1]:
-            self.claims[addr] = (name, depth, False, owner)
+            self.claims[addr] = (name, depth, False, owner, register_cc)
         elif depth == best[1] and name != best[0]:
-            self.claims[addr] = (best[0], best[1], True, best[3])
+            self.claims[addr] = (best[0], best[1], True, best[3], best[4])
 
     def resolved(self):
-        for addr, (name, _, tied, owner) in sorted(self.claims.items()):
+        for addr, (name, _, tied, owner, register_cc) in sorted(
+                self.claims.items()):
             if tied:
                 self.conflicts += 1
                 continue
-            yield addr, name, owner
+            yield addr, name, owner, register_cc
 
 
 # -------------------------------------------------------------------- applier
@@ -947,8 +948,8 @@ class Applier(object):
                     elif kind == "virtual":
                         self._claim_virtual(claims, vmt, value, verb, pname)
 
-        for addr, name, owner in claims.resolved():
-            self._name_function(addr, name, owner)
+        for addr, name, owner, register_cc in claims.resolved():
+            self._name_function(addr, name, owner, register_cc)
         self.stats["name_conflicts"] = claims.conflicts
 
     IUNKNOWN_SLOTS = ["QueryInterface", "_AddRef", "_Release"]
@@ -961,6 +962,11 @@ class Applier(object):
         vtable starts with can be named properly.  The rest are numbered, and
         claimed at a deliberately low priority so any real name from a method
         or property table wins the slot instead.
+
+        These claims carry no convention.  A thunk follows the convention its
+        interface declares, not the one the class uses: IUnknown's three slots
+        are stdcall, and their thunks adjust the instance pointer at [esp+4]
+        rather than in EAX.
         """
         for entry in vmt.interfaces:
             iname = self.md.interface_names().get(entry["guid"], "IUnknown")
@@ -975,7 +981,7 @@ class Applier(object):
                         else "vtbl%d" % i)
                 claims.claim(addr, "%s.%s_%s" % (sanitize(vmt.name),
                                                  sanitize(iname), slot),
-                             depth + 1000, vmt.addr)
+                             depth + 1000, vmt.addr, register_cc=False)
 
     def _claim_virtual(self, claims, vmt, offset, verb, pname):
         """Name the slot `offset` in every class that shares it.
@@ -996,7 +1002,7 @@ class Applier(object):
                          "%s.%s_%s" % (sanitize(other.name), verb, pname),
                          len(self.md.class_chain(other)), other.addr)
 
-    def _name_function(self, addr, name, owner=None):
+    def _name_function(self, addr, name, owner=None, register_cc=True):
         if not self.bv.is_valid_offset(addr) or not self.md._is_code(addr):
             return
         self_type = None
@@ -1004,7 +1010,7 @@ class Applier(object):
             vmt = self.md.vmts.get(owner)
             if vmt is not None:
                 self_type = sinks.self_pointer(self.bv, self.factory, vmt)
-        if self.sink.add_function(addr, name, self_type):
+        if self.sink.add_function(addr, name, self_type, register_cc):
             self.stats["functions_named"] += 1
 
     def _finish(self):

@@ -15,7 +15,7 @@ those stay on the view path.
 
 import binaryninja as bn
 from binaryninja import (FunctionParameter, NamedTypeReferenceClass, Symbol,
-                         SymbolType, Type)
+                         SymbolType, Type, Variable, VariableSourceType)
 
 TAG = "delphinja"
 
@@ -29,8 +29,13 @@ class Sink(object):
     def add_data_var(self, addr, ty, name):
         raise NotImplementedError
 
-    def add_function(self, addr, name, self_type=None):
-        """Return True when the function was named."""
+    def add_function(self, addr, name, self_type=None, register_cc=True):
+        """Return True when the function was named.
+
+        `register_cc` says the class metadata fixes the convention.  It does
+        for a method the class publishes; it does not for an interface vtable
+        thunk, whose convention the interface declares.
+        """
         raise NotImplementedError
 
     def set_comment(self, addr, text):
@@ -50,6 +55,7 @@ class ViewSink(Sink):
         self.md = md
         self.created = 0
         self.pending_self = []
+        self.cc = _register_convention(bv)
 
     def add_type(self, name, ty):
         self.bv.define_user_type(name, ty)
@@ -60,7 +66,7 @@ class ViewSink(Sink):
     def set_comment(self, addr, text):
         self.bv.set_comment_at(addr, text)
 
-    def add_function(self, addr, name, self_type=None):
+    def add_function(self, addr, name, self_type=None, register_cc=True):
         bv = self.bv
         func = bv.get_function_at(addr)
         if func is None:
@@ -74,11 +80,11 @@ class ViewSink(Sink):
             return False                            # respect existing names
         bv.define_user_symbol(Symbol(SymbolType.FunctionSymbol, addr, name))
         if self_type is not None:
-            self.pending_self.append((addr, self_type))
+            self.pending_self.append((addr, self_type, register_cc))
         return True
 
     def finish(self):
-        """Type Self once analysis has produced parameter variables.
+        """Assert the convention and type Self once analysis has run.
 
         Parameter variables do not exist until the function has been analysed,
         and functions created moments ago have not been, so this cannot run
@@ -88,13 +94,13 @@ class ViewSink(Sink):
             return 0
         self.bv.update_analysis_and_wait()
         typed = 0
-        for addr, self_type in self.pending_self:
+        for addr, self_type, register_cc in self.pending_self:
             func = self.bv.get_function_at(addr)
-            if func is None or not len(func.parameter_vars):
+            if func is None:
                 continue
             try:
-                func.create_user_var(func.parameter_vars[0], self_type, "Self")
-                typed += 1
+                typed += apply_method(func, self_type,
+                                      self.cc if register_cc else None)
             except Exception as exc:
                 bn.log_warn("Self on 0x%x: %s" % (addr, exc), TAG)
         self.pending_self = []
@@ -119,6 +125,7 @@ class AutoSink(Sink):
         self.md = md
         self.created = 0
         self.pending_self = []
+        self.cc = _register_convention(bv)
 
     def add_type(self, name, ty):
         self.bv.define_type(Type.generate_auto_type_id("delphinja", name),
@@ -130,7 +137,7 @@ class AutoSink(Sink):
     def set_comment(self, addr, text):
         self.bv.set_comment_at(addr, text)
 
-    def add_function(self, addr, name, self_type=None):
+    def add_function(self, addr, name, self_type=None, register_cc=True):
         bv = self.bv
         func = bv.get_function_at(addr)
         if func is None:
@@ -152,7 +159,7 @@ class AutoSink(Sink):
             return False                            # respect existing names
         bv.define_auto_symbol(Symbol(SymbolType.FunctionSymbol, addr, name))
         if self_type is not None:
-            self.pending_self.append((addr, self_type))
+            self.pending_self.append((addr, self_type, register_cc))
         return True
 
     def finish(self):
@@ -191,11 +198,14 @@ class DebugInfoSink(Sink):
         # unaffected: _component_function_added takes the handle directly.
         self.debug_info.add_data_variable(addr, ty, name)
 
-    def add_function(self, addr, name, self_type=None):
+    def add_function(self, addr, name, self_type=None, register_cc=True):
         ftype = None
-        if self_type is not None:
+        if self_type is not None and register_cc:
             # Self in the prototype replaces the view path's deferred pass:
             # the parameter is named and typed the moment the function exists.
+            # A prototype is the only way this container can express either
+            # the convention or Self, so it is built only where the metadata
+            # fixes the convention; an interface thunk is left to analysis.
             ftype = Type.function(Type.void(),
                                   [FunctionParameter(self_type, "Self")],
                                   calling_convention=self.cc)
@@ -208,6 +218,53 @@ class DebugInfoSink(Sink):
             function_type=ftype,
             platform=self.bv.platform,
             components=self._components([owner]))))
+
+
+def apply_method(func, self_type, cc):
+    """Assert on `func` what the class metadata proves about it.
+
+    Returns 1 when Self was typed, so callers can count it.
+
+    The convention is set on the function rather than through a replacement
+    prototype.  `register` and `regparm` claim the same three registers but
+    disagree on who pops the stack and on the order the remaining arguments
+    are pushed, so a method with more than three parameters has its stack
+    arguments transposed under the wrong one; asserting a whole prototype to
+    fix that would throw away the return type and parameter list analysis has
+    already worked out.
+    """
+    if cc is not None:
+        current = func.calling_convention
+        if current is None or current.name != cc.name:
+            func.calling_convention = cc
+    var = self_variable(func, cc)
+    if var is None:
+        return 0
+    func.create_user_var(var, self_type, "Self")
+    return 1
+
+
+def self_variable(func, cc):
+    """The variable Self arrives in.
+
+    Delphi puts Self in the convention's first integer argument register, so
+    the variable is named by its location rather than by asking which one
+    analysis calls parameter zero.  The parameter list is still the one
+    derived under the convention analysis guessed, and where that guess was a
+    stack convention its parameter zero is a different variable entirely.
+
+    Which register that is comes from the convention -- `int_arg_regs[0]`,
+    which is EAX once x86 resolves it -- and is not written down here.
+
+    With no convention to go on -- an interface thunk, whose convention the
+    interface declares -- analysis's own parameter zero is the best answer.
+    """
+    regs = cc.int_arg_regs if cc is not None else None
+    if regs:
+        return Variable(func, VariableSourceType.RegisterVariableSourceType, 0,
+                        func.arch.get_reg_index(regs[0]))
+    params = func.parameter_vars
+    return params[0] if len(params) else None
 
 
 def _register_convention(bv):

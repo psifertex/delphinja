@@ -107,7 +107,8 @@ def _recover(context):
         sink = sinks.AutoSink(bv, md)
         stats = A.Applier(md, {"undefine": False}, sink=sink).run()
         bn.log_info("timing: scan %.2fs apply %.2fs" % (t_scan, time.time() - t0), TAG)
-        _state(bv).update(md=md, pending_self=list(sink.pending_self))
+        _state(bv).update(md=md, pending_self=list(sink.pending_self),
+                          cc=sink.cc)
         bn.log_info("recovered %d names, %d data variables, %d comments, %d types"
                     % (stats["functions_named"], stats["data_vars"],
                        stats["comments"], stats["structs"] + stats["enums"]),
@@ -130,18 +131,24 @@ def _cleanup(context):
         t_undef = time.time() - t0
         t0 = time.time()
         typed = 0
-        for addr, self_type in state.get("pending_self", ()):
+        conventions = 0
+        cc = state.get("cc")
+        for addr, self_type, register_cc in state.get("pending_self", ()):
             func = bv.get_function_at(addr)
-            if func is not None and len(func.parameter_vars):
-                try:
-                    func.create_user_var(func.parameter_vars[0], self_type, "Self")
-                    typed += 1
-                except Exception:
-                    pass
+            if func is None:
+                continue
+            method_cc = cc if register_cc else None
+            try:
+                typed += sinks.apply_method(func, self_type, method_cc)
+            except Exception:
+                continue
+            if method_cc is not None:
+                conventions += 1
         state.clear()
         bn.log_info("timing: undefine %.2fs self %.2fs" % (t_undef, time.time() - t0), TAG)
-        bn.log_info("removed %d functions over metadata, typed %d Self parameters"
-                    % (len(removed), typed), TAG)
+        bn.log_info("removed %d functions over metadata, set the register "
+                    "convention on %d methods, typed %d Self parameters"
+                    % (len(removed), conventions, typed), TAG)
     except Exception as exc:
         bn.log_error("cleanup failed: %s" % exc, TAG)
 
