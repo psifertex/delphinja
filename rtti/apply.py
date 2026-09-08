@@ -633,7 +633,7 @@ class TypeFactory(object):
     def prop_type(self, prop):
         return self.rtti_type(self.md.typeinfo_by_ptr(prop["PropType"]))
 
-    def rtti_type(self, ti):
+    def rtti_type(self, ti, seen=frozenset()):
         arch = self.bv.arch
         if ti is None:
             return Type.int(4)
@@ -673,10 +673,30 @@ class TypeFactory(object):
             return Type.array(Type.int(1, False), 16)    # TVarData
         if k == 16:
             return Type.int(8)
-        if k in (13, 14):                                # array / record
+        if k == 18:                                      # UnicodeString
+            # Two bytes per character, and the compiler passes the address of
+            # the first one.  Typing it `char *` -- the obvious mistake, and
+            # the one that makes every recovered string in a modern binary
+            # decompile as its first letter -- is wrong about the element,
+            # not just about the encoding.
+            return Type.pointer(arch, Type.wide_char(2))
+        if k in (13, 14, 22):                     # array / record / mrecord
             size = ti.data.get("Size") or 4
             return Type.array(Type.int(1, False), max(1, size))
-        if k in (15, 17):                                # interface / dynarray
+        if k == 20:                                      # typed pointer
+            # `Pointer` itself publishes no RefType, and a type that points at
+            # itself -- a linked-list node -- would otherwise recurse forever,
+            # so an unresolved or repeated target is void.
+            target = self.md.typeinfo_by_ptr(ti.data.get("RefType"))
+            if target is None or target.addr in seen:
+                return Type.pointer(arch, Type.void())
+            return Type.pointer(arch, self.rtti_type(target,
+                                                     seen | {ti.addr}))
+        if k in (15, 17, 19, 21):
+            # An interface is a pointer to its own vtable, a dynamic array a
+            # pointer to its first element, a class reference a pointer to a
+            # VMT and a procedure type a code address.  All four are one
+            # pointer wide and none of them has a struct here to point at.
             return Type.pointer(arch, Type.void())
         return Type.int(4)
 
@@ -697,22 +717,29 @@ class NameClaims(object):
         self.claims = {}
         self.conflicts = 0
 
-    def claim(self, addr, name, depth, owner=None, register_cc=True):
+    def claim(self, addr, name, depth, owner=None, register_cc=True,
+              kind=P.MK_METHOD):
+        """`kind` is what shape Self has, from TVmtMethodExEntry.Flags.
+
+        Everything the extended array does not describe -- a dynamic handler,
+        a property accessor, a standard TObject slot -- is an ordinary
+        instance method, which is what the default says.
+        """
         if not addr:
             return
         best = self.claims.get(addr)
         if best is None or depth < best[1]:
-            self.claims[addr] = (name, depth, False, owner, register_cc)
+            self.claims[addr] = (name, depth, False, owner, register_cc, kind)
         elif depth == best[1] and name != best[0]:
-            self.claims[addr] = (best[0], best[1], True, best[3], best[4])
+            self.claims[addr] = best[:2] + (True,) + best[3:]
 
     def resolved(self):
-        for addr, (name, _, tied, owner, register_cc) in sorted(
+        for addr, (name, _, tied, owner, register_cc, kind) in sorted(
                 self.claims.items()):
             if tied:
                 self.conflicts += 1
                 continue
-            yield addr, name, owner, register_cc
+            yield addr, name, owner, register_cc, kind
 
 
 # -------------------------------------------------------------------- applier
@@ -886,7 +913,11 @@ class Applier(object):
         for start, end, label in vmt.regions:
             if start in typed:
                 continue
-            self._bytes_var(start, end, "%s_%s" % (label, base))
+            # A class emits one region per extended method entry, so the
+            # label carries the method's own name to tell them apart -- and
+            # that name comes out of the binary, so it goes through sanitize
+            # like every other name does.
+            self._bytes_var(start, end, "%s_%s" % (sanitize(label), base))
 
     def _apply_tables(self, vmt, base):
         """Declare the dynamic and interface method tables as what they are.
@@ -936,19 +967,31 @@ class Applier(object):
 
     def _name_functions(self, class_props):
         claims = NameClaims()
+        declared = self._declared_dynamic_names()
+        slots = self._declared_slot_names()
+        stubs = self._abstract_stubs()
         for vmt in self.md.vmts.values():
             depth = len(self.md.class_chain(vmt))
             cls = sanitize(vmt.name)
-            for m in vmt.methods:
+            # Both method arrays. All but a fraction of a percent of a modern
+            # binary's method names live in the extended one, and where the
+            # two describe the same method they agree on its name, so the
+            # duplicate claims settle rather than count as a conflict.
+            for m in vmt.methods + vmt.methods_ex:
                 claims.claim(m["addr"], "%s.%s" % (cls, sanitize(m["name"])),
-                             depth, vmt.addr)
+                             depth, vmt.addr,
+                             kind=m.get("method_kind", P.MK_METHOD))
             for d in vmt.dynamic:
+                name = declared.get(vmt.addr, {}).get(d["id"])
                 claims.claim(d["addr"],
-                             "%s.%s" % (cls, messages.handler_name(d["id"])),
+                             "%s.%s" % (cls, sanitize(name) if name
+                                        else messages.handler_name(d["id"])),
                              depth, vmt.addr)
             for off, slot in P.std_methods(self.md.layout):
                 claims.claim(self.md.reader.u32(vmt.addr + off),
                              "%s.%s" % (cls, slot), depth, vmt.addr)
+            for index, name in slots.get(vmt.addr, {}).items():
+                self._claim_slot(claims, vmt, index, name, depth, stubs)
             self._claim_interfaces(claims, vmt, depth)
             for prop in class_props.get(vmt.addr, []):
                 pname = sanitize(prop["Name"])
@@ -961,9 +1004,97 @@ class Applier(object):
                     elif kind == "virtual":
                         self._claim_virtual(claims, vmt, value, verb, pname)
 
-        for addr, name, owner, register_cc in claims.resolved():
-            self._name_function(addr, name, owner, register_cc)
+        for addr, name, owner, register_cc, kind in claims.resolved():
+            self._name_function(addr, name, owner, register_cc, kind)
         self.stats["name_conflicts"] = claims.conflicts
+
+    def _declared_indices(self, key):
+        """class address -> {VirtualIndex: name} over the entries `key` picks.
+
+        Merged along each class's chain, root first, so a class sees every
+        index an ancestor declared as well as its own.  That is the direction
+        both callers want and the only one that is sound: a name published by a
+        descendant says nothing about an ancestor, which may not have the slot
+        or the dynamic method at all.
+        """
+        own = {}
+        for vmt in self.md.vmts.values():
+            own[vmt.addr] = {m["virtual_index"]: m["name"]
+                             for m in vmt.methods_ex if m.get(key)}
+        out = {}
+        for vmt in self.md.vmts.values():
+            merged = {}
+            for cls in self.md.class_chain(vmt):
+                merged.update(own.get(cls.addr, {}))
+            out[vmt.addr] = merged
+        return out
+
+    def _declared_dynamic_names(self):
+        """class address -> {dynamic id: the name it was declared with}.
+
+        A dynamic method table is two parallel arrays of ids and handlers with
+        no names at all, so a plain `dynamic` method could only ever be called
+        `DynMethod_m3` -- and where the class also published an extended entry
+        for it, that name and the entry's real one tied at the same depth and
+        both were dropped, leaving the handler unnamed.  The extended array is
+        where the name is: an entry flagged FLAG_DYNAMIC carries the dispatch
+        id in VirtualIndex instead of a vtable slot, and across the corpus all
+        168 of them name an id that really is in the class's own or an
+        inherited dynamic table, against the handler address the entry itself
+        carries.  A message handler keeps its WM_/CM_/CN_ constant unless the
+        binary names it, which it rarely does -- those are protected by
+        convention, and pre-2010 nothing publishes a protected member at all.
+
+        Inheriting the map down the chain is how dispatch itself works: an id
+        is resolved by walking to the root, so whichever ancestor declared it
+        fixes its meaning for the whole branch, and a descendant overriding it
+        emits a table entry but often no extended entry of its own.
+        """
+        return self._declared_indices("dynamic")
+
+    def _declared_slot_names(self):
+        """class address -> {vtable slot index: declared name}.
+
+        A VMT is a bare array of code pointers, so an override's name exists in
+        the binary only where some class publishes an extended entry for the
+        slot -- and that is the class which *declares* the method, not usually
+        the one that overrides it.  Delphi's vtables are prefix extended: a
+        descendant's table is its parent's followed by whatever the descendant
+        adds, so slot `i` means the same method throughout a branch and a name
+        declared anywhere up the chain is the right name for this class's slot,
+        whatever address the class put there.
+
+        Never the other way.  There is no way to recover how long an ancestor's
+        vtable is -- `vtable_end` is only where a walk stopped finding code
+        addresses, which over-runs into whatever the linker put next -- so
+        carrying a descendant's name upwards would put a guess on a shallower
+        class, and the shallowest claim is the one that wins.
+        """
+        return self._declared_indices("virtual")
+
+    def _abstract_stubs(self):
+        """The addresses an abstract method's vtable slot holds.
+
+        `procedure Foo; virtual; abstract;` still occupies a slot, and the
+        compiler fills it with System's @AbstractError -- one address shared by
+        every abstract slot in the binary.  It is not any class's Foo, and
+        naming it from a slot would hand the routine every abstract call in the
+        program raises through one arbitrary class's method name: on
+        ImageWriterSvc 184 slot claims land on it, and the shallowest of them
+        would have called it `TMultiWaitEvent.WaitFor`.  The entries say which
+        slots are abstract, so the addresses are read out of the binary rather
+        than recognised from a signature.
+        """
+        ptr = self.md.layout.ptr_size
+        out = set()
+        for vmt in self.md.vmts.values():
+            for m in vmt.methods_ex:
+                if not m.get("abstract"):
+                    continue
+                addr = self.md.reader.ptr(vmt.addr + m["virtual_index"] * ptr)
+                if addr:
+                    out.add(addr)
+        return out
 
     IUNKNOWN_SLOTS = ["QueryInterface", "_AddRef", "_Release"]
 
@@ -996,6 +1127,27 @@ class Applier(object):
                                                  sanitize(iname), slot),
                              depth + 1000, vmt.addr, register_cc=False)
 
+    def _claim_slot(self, claims, vmt, index, name, depth, stubs):
+        """Name whatever `vmt` put in vtable slot `index`.
+
+        One class only -- the whole branch is covered because every class is
+        offered the indices its ancestors declared.  A class that does not
+        override the slot names its ancestor's implementation, which is the
+        same claim the ancestor makes at a shallower depth and so settles
+        rather than conflicts.
+        """
+        layout = self.md.layout
+        if index < -layout.n_virtuals:
+            return                             # a data slot, not a method one
+        addr = vmt.addr + index * layout.ptr_size
+        if index >= 0 and addr >= vmt.vtable_end:
+            return                             # past this class's vtable
+        target = self.md.reader.ptr(addr)
+        if not target or target in stubs or not self.md._is_code(target):
+            return
+        claims.claim(target, "%s.%s" % (sanitize(vmt.name), sanitize(name)),
+                     depth, vmt.addr)
+
     def _claim_virtual(self, claims, vmt, offset, verb, pname):
         """Name the slot `offset` in every class that shares it.
 
@@ -1015,14 +1167,30 @@ class Applier(object):
                          "%s.%s_%s" % (sanitize(other.name), verb, pname),
                          len(self.md.class_chain(other)), other.addr)
 
-    def _name_function(self, addr, name, owner=None, register_cc=True):
+    def _name_function(self, addr, name, owner=None, register_cc=True,
+                       kind=None):
+        """Name one function, and say what arrives in the convention's first
+        argument register.
+
+        Three shapes, and the metadata says which:  an ordinary method gets
+        the instance, so Self is a pointer to the class struct;  a class
+        method gets the metaclass -- the class pointer itself, where the
+        vtable starts, which is exactly why the RTTI publishes no ParamType
+        for that Self -- so a pointer to the instance struct would name every
+        field at the wrong address;  and a static class method gets no Self at
+        all, so the register holds the first real argument and asserting Self
+        over it would rename and mistype a genuine parameter.
+        """
         if not self.bv.is_valid_offset(addr) or not self.md._is_code(addr):
             return
         self_type = None
-        if self.opt["self_param"] and owner:
+        if self.opt["self_param"] and owner and kind != P.MK_STATIC:
             vmt = self.md.vmts.get(owner)
             if vmt is not None:
-                self_type = sinks.self_pointer(self.bv, self.factory, vmt)
+                self_type = (Type.pointer(self.bv.arch, Type.void())
+                             if kind == P.MK_CLASS_METHOD
+                             else sinks.self_pointer(self.bv, self.factory,
+                                                     vmt))
         if self.sink.add_function(addr, name, self_type, register_cc):
             self.stats["functions_named"] += 1
 
@@ -1093,6 +1261,62 @@ def _prop_summary(md, prop):
     return "  ".join(parts)
 
 
+#: TParamFlag -> the Pascal keyword it stands for. The rest of the flags say
+#: how the parameter is passed rather than how it was declared, so they do not
+#: belong in a signature.
+_PARAM_KEYWORDS = {"pfVar": "var", "pfConst": "const", "pfOut": "out"}
+
+#: What the low three bits of TVmtMethodExEntry.Flags say the member is.
+_METHOD_KINDS = {P.MK_STATIC: "static", P.MK_METHOD: "method",
+                 P.MK_CLASS_METHOD: "class method",
+                 P.MK_CONSTRUCTOR: "constructor",
+                 P.MK_DESTRUCTOR: "destructor"}
+
+
+def _method_summary(md, m):
+    """`(Self: TFoo; const S: string): Integer   method ccReg vmt[39]`.
+
+    Only names are resolved, never records: reading the kind byte and name a
+    PPTypeInfo points at costs two dereferences, where parsing the record it
+    points at would parse every published property of a class for each of the
+    thousands of parameters a modern binary declares.
+
+    A parameter the RTTI gives no type for is printed without one.  That is
+    what the metadata says -- an untyped `var`, or the metaclass Self a class
+    method receives -- and inventing a type for it would be a claim the
+    binary does not make.
+    """
+    parts = []
+    if m["params"] is not None:
+        params = []
+        for p in m["params"]:
+            keywords = [_PARAM_KEYWORDS[f] for f in p["flag_names"]
+                        if f in _PARAM_KEYWORDS]
+            ptype = P.typeinfo_name(md.reader, p["type"])
+            params.append("%s%s%s" % (
+                "".join(k + " " for k in keywords), p["name"],
+                ": " + ptype if ptype else ""))
+        parts.append("(%s)" % "; ".join(params))
+    result = P.typeinfo_name(md.reader, m["result_type"])
+    if result:
+        parts.append(": " + result)
+    tail = [_METHOD_KINDS.get(m["method_kind"], "flags $%02x" % m["flags"]),
+            m.get("cc")]
+    if m.get("abstract"):
+        tail.append("abstract")
+    # The same field, read two ways, and Flags is what says which: a vtable
+    # slot index or a dynamic dispatch id.  Printing an id as `vmt[-3]` is how
+    # a plain dynamic method comes to look like a virtual one at a slot that
+    # holds some unrelated function.
+    if m.get("virtual"):
+        tail.append("vmt[%d]" % m["virtual_index"])
+    elif m.get("dynamic"):
+        kind, name = messages.classify(m["virtual_index"])
+        tail.append("%s[%s]" % ("dynamic" if kind == messages.MSG_KIND_INDEX
+                                else "message", name))
+    return "%s   %s" % ("".join(parts), " ".join(t for t in tail if t))
+
+
 def describe_vmt(md, vmt):
     chain = " -> ".join(v.name for v in md.class_chain(vmt))
     unit, source = md.unit_for(vmt)
@@ -1108,6 +1332,15 @@ def describe_vmt(md, vmt):
         lines.append("  field  +0x%-5x %s" % (f["offset"], f["name"]))
     for m in vmt.methods:
         lines.append("  method 0x%08x %s" % (m["addr"], m["name"]))
+    # The extended array repeats every classic entry as a record of its own,
+    # so the ones already listed above are not listed twice; what is left is
+    # everything the classic table never mentioned, which is nearly all of it.
+    classic = {(m["addr"], m["name"]) for m in vmt.methods}
+    for m in vmt.methods_ex:
+        if (m["addr"], m["name"]) in classic:
+            continue
+        lines.append("  method 0x%08x %s%s" % (m["addr"], m["name"],
+                                               _method_summary(md, m)))
     for d in vmt.dynamic:
         kind, name = messages.classify(d["id"])
         lines.append("  %-7s 0x%08x %s (0x%04x)"
@@ -1136,6 +1369,24 @@ def to_json(md):
             "fields": vmt.fields,
             "methods": [{"name": m["name"], "addr": m["addr"]}
                         for m in vmt.methods],
+            "methods_ex": [
+                {"name": m["name"], "addr": m["addr"], "entry": m["entry"],
+                 "flags": m["flags"],
+                 "kind": _METHOD_KINDS.get(m["method_kind"]),
+                 # Two readings of one field, and neither is meaningful unless
+                 # the flag beside it says so, so each is exported under its
+                 # own key rather than as a raw number a consumer has to
+                 # re-interpret.
+                 "virtual_index": m["virtual_index"] if m["virtual"] else None,
+                 "dynamic_id": m["virtual_index"] if m["dynamic"] else None,
+                 "abstract": m["abstract"],
+                 "cc": m["cc"],
+                 "result_type": P.typeinfo_name(md.reader, m["result_type"]),
+                 "params": [
+                     {"name": p["name"], "flags": p["flag_names"],
+                      "type": P.typeinfo_name(md.reader, p["type"])}
+                     for p in m["params"] or []]}
+                for m in vmt.methods_ex],
             "dynamic": [{"id": d["id"], "addr": d["addr"],
                          "message": messages.classify(d["id"])[1]}
                         for d in vmt.dynamic],

@@ -102,8 +102,8 @@ def cmd_report(bv):
         for vmt in sorted(md.vmts.values(), key=lambda v: v.name):
             ti = props.get(vmt.addr)
             published = "%d methods, %d fields, %d dynamic, %d props" % (
-                len(vmt.methods), len(vmt.fields), len(vmt.dynamic),
-                len(ti.props) if ti else 0)
+                len(vmt.methods) + len(vmt.methods_ex), len(vmt.fields),
+                len(vmt.dynamic), len(ti.props) if ti else 0)
             lines.append("| 0x%x | %s | %s | %s | %s |"
                          % (vmt.addr, vmt.name, vmt.instance_size,
                             " &lt; ".join(v.name for v in

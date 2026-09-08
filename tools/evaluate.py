@@ -50,7 +50,7 @@ def evaluate(path):
         return out
     claims = {}
     for vmt in md.vmts.values():
-        for m in vmt.methods:
+        for m in vmt.methods + vmt.methods_ex:
             claims[m["addr"]] = "%s.%s" % (vmt.name, m["name"])
         for d in vmt.dynamic:
             claims[d["addr"]] = vmt.name

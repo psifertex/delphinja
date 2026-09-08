@@ -15,6 +15,13 @@ TYPE_KINDS = {
     9: "tkWChar", 10: "tkLString", 11: "tkWString", 12: "tkVariant",
     13: "tkArray", 14: "tkRecord", 15: "tkInterface", 16: "tkInt64",
     17: "tkDynArray",
+    # Delphi 2009 appended tkUString and 2010 the three after it; 10.4 added
+    # tkMRecord. A parser that stops at tkDynArray does not merely miss those
+    # records, it mistypes every parameter and property that refers to one:
+    # UnicodeString is the string type of every modern binary, and an
+    # unresolved PPTypeInfo falls back to a plain integer.
+    18: "tkUString", 19: "tkClassRef", 20: "tkPointer", 21: "tkProcedure",
+    22: "tkMRecord",
 }
 
 ORD_TYPES = {0: "otSByte", 1: "otUByte", 2: "otSWord", 3: "otUWord",
@@ -25,8 +32,79 @@ METHOD_KINDS = {0: "mkProcedure", 1: "mkFunction", 2: "mkConstructor",
                 3: "mkDestructor", 4: "mkClassProcedure", 5: "mkClassFunction",
                 6: "mkClassConstructor", 7: "mkClassDestructor",
                 8: "mkOperatorOverload"}
+# TParamFlags, one bit per TParamFlag ordinal. pfResult is the seventh and
+# marks the hidden parameter a function returning a managed or oversized type
+# is compiled with; it never appears in a tkMethod record, because that shape
+# spells the result out separately, but roughly one extended-RTTI parameter in
+# forty carries it. The eighth bit is unused by every compiler in the corpus.
 PARAM_FLAGS = [(0x01, "pfVar"), (0x02, "pfConst"), (0x04, "pfArray"),
-               (0x08, "pfAddress"), (0x10, "pfReference"), (0x20, "pfOut")]
+               (0x08, "pfAddress"), (0x10, "pfReference"), (0x20, "pfOut"),
+               (0x40, "pfResult")]
+
+#: TCallConv, as TVmtMethodEntryTail.CC records it.
+CALL_CONVS = {0: "ccReg", 1: "ccCdecl", 2: "ccPascal", 3: "ccStdCall",
+              4: "ccSafeCall"}
+
+# TVmtMethodExEntry.Flags. The field is usually described as holding the
+# member's visibility, and it does not: every member of TObject is declared
+# public in System.pas, yet a Delphi 10.1 build gives Create $44, Destroy $4D,
+# ClassName $43 and Free $42. What the low THREE bits hold is the kind of
+# member, and the entries corroborate that exactly -- across all 15,351
+# extended entries in the corpus, without a single exception:
+#
+#   1  static        no Self parameter at all (`class function ...; static`)
+#   2  method        Self typed as the instance
+#   3  class method  Self present but with no ParamType: it is the metaclass
+#   4  constructor   Self typed as the instance
+#   5  destructor    Self typed as the instance, and named Destroy every time
+#
+# Which of the three shapes Self has is the fact the applier needs, and it is
+# the one the entries prove rather than the one the field is named after.
+# Visibility is in there too, in bits 5 and 6 -- $02/$22/$42/$62 are the four
+# TMemberVisibility values -- but nothing here has a use for it.
+METHOD_KIND_MASK = 0x07
+MK_STATIC, MK_METHOD, MK_CLASS_METHOD = 1, 2, 3
+MK_CONSTRUCTOR, MK_DESTRUCTOR = 4, 5
+
+# Bits 3, 4 and 7 say how the method is dispatched and hence how to read
+# VirtualIndex.  Every one of the 15,351 extended entries in the corpus has
+# exactly one of bit 3 and bit 4 set, or neither and then VirtualIndex is the
+# sentinel -- the three cases partition the entries with no overlap and no
+# remainder, which is what makes reading the field safe:
+#
+#   bit 3  the method occupies a vtable slot and VirtualIndex is that slot
+#   bit 4  the method is dispatched dynamically and VirtualIndex is its
+#          dynamic-table id -- a negative counter for a plain `dynamic`
+#          method, the message id for a `message` one.  168/168 of these ids
+#          appear in the class's own or an inherited dynamic table, against
+#          the same handler address the entry itself carries.
+#   bit 7  the method is abstract.  563/563 of these have a CodeAddress that
+#          is a five-byte `jmp rel32` to one single address per binary --
+#          System's @AbstractError -- and the vtable slot VirtualIndex names
+#          holds that same shared address rather than the thunk.  So the index
+#          is right and the slot is not the method: naming what sits there
+#          would give @AbstractError one arbitrary class's method name.
+#
+# Reading the field without bit 4 is what makes a plain dynamic method look
+# like a vtable slot that resolves to the wrong function, and reading it
+# without bit 7 makes every abstract declaration look like a mismatch; between
+# them those two are the whole of the ~20% of non-sentinel entries whose index
+# does not lead back to the entry's own code address.
+FLAG_VIRTUAL = 0x08
+FLAG_DYNAMIC = 0x10
+FLAG_ABSTRACT = 0x80
+
+
+def no_slot_index(layout):
+    """The VirtualIndex a method occupying no vtable slot carries.
+
+    One below the last standard TObject virtual, so it moves with the era:
+    -12 where TObject has eleven virtuals, -9 where it has eight.  Hardcoding
+    a value would silently turn every non-virtual entry of a 2009 binary into
+    a plausible-looking slot index in a Delphi 3 one.
+    """
+    return -(layout.n_virtuals + 1)
+
 
 # The eleven data slots, in order from the start of the VMT header. Their
 # order has never changed; only the header's distance from the class pointer
@@ -291,7 +369,14 @@ def self_pointers(reader, start, end, deltas, step=1, width=4):
             yield addr
 
 
-def is_identifier(text, min_len=1, max_len=128):
+def is_identifier(text, min_len=1, max_len=255):
+    # The cap is the ShortString's own limit, not a guess at how long a name
+    # ought to be. A nested generic instantiation spells out every type
+    # argument fully qualified, so
+    # TEnumerable<System.Generics.Collections.TPair<System.Messaging.
+    # TMessageListenerMethod,System.Messaging.TMessageManager.TListenerData>>
+    # is 133 characters of perfectly ordinary Delphi 12 class name; a shorter
+    # cap silently discards the VMT and every method it publishes.
     if text is None or not (min_len <= len(text) <= max_len):
         return False
     # Delphi identifiers, plus '.' for qualified unit names, the compiler's
@@ -299,7 +384,24 @@ def is_identifier(text, min_len=1, max_len=128):
     # generic type names carry -- TArray<System.Byte> is a perfectly ordinary
     # RTTI name from 2010 onwards, and rejecting it discards a large share of
     # the type records in a modern binary.
-    return all(c.isalnum() or c in "_.$@<>," for c in text)
+    #
+    # The backtick and the square brackets are two more of the compiler's own
+    # decorations, and they are the whole of what a modern binary's VMT scan
+    # was missing.  An anonymous method compiles to a hidden class holding the
+    # captured variables, and the compiler names it after where it was written:
+    #
+    #     @TList`1.Pack[0]$ActRec<System.Classes.TComponent>
+    #
+    # `1 is the generic arity of the enclosing type, [0] the ordinal of the
+    # closure within the enclosing routine -- XE2 spells that same ordinal
+    # $23$ instead, which is why only the newer samples needed the brackets --
+    # and $ActRec marks the activation record.  These are ordinary
+    # TInterfacedObject descendants with a real VMT, an interface table and a
+    # tkClass record; rejecting the name discarded 69 of imagewriter's 815
+    # classes, 65 of httpdiag's 652 and 49 of vcl_ad4d's 937, along with the
+    # interface vtables behind them, which is exactly the set a competing
+    # Ghidra plugin found and this one did not.
+    return all(c.isalnum() or c in "_.$@<>,`[]" for c in text)
 
 
 
@@ -412,7 +514,11 @@ def parse_typeinfo(r, addr, follow_props=True):
         ti.data["ElCount"] = r.i32(p + 4)
         ti.data["ElType"] = r.u32(p + 8)
         p += 12
-    elif kind == 14:                                         # tkRecord
+    elif kind in (14, 22):                       # tkRecord / tkMRecord
+        # A managed record leads with exactly the plain record's shape and
+        # only then adds the operator table Delphi 10.4 introduced, which
+        # nothing here reads, so the two share this branch and the record
+        # ends -- conservatively -- at the last managed field.
         ti.data["Size"] = r.i32(p)
         cnt = r.i32(p + 4)
         ti.data["ManagedFieldCount"] = cnt
@@ -438,10 +544,84 @@ def parse_typeinfo(r, addr, follow_props=True):
         ti.data["ElType2"] = r.u32(p + 12)
         p += 16
         ti.unit, p = _unitname(r, p)
-    # tkLString / tkWString / tkVariant carry no TTypeData at all.
+    elif kind in (19, 20):                       # tkClassRef / tkPointer
+        # One PPTypeInfo naming what the reference or pointer points at:
+        # InstanceType for a metaclass, RefType for a pointer.
+        ti.data["RefType"] = r.ptr(p)
+        p += r.layout.ptr_size
+    elif kind == 21:                                         # tkProcedure
+        ti.data["Signature"], p = _proc_signature(r, p)
+    # tkLString / tkWString / tkVariant / tkUString carry no TTypeData at all.
 
     ti.end = p
     return ti
+
+
+#: TProcedureSignature.Flags when the compiler published no signature at all.
+NO_SIGNATURE = 0xFF
+
+
+def _proc_signature(r, p):
+    """TProcedureSignature, the body of a tkProcedure record.
+
+        Byte        Flags          $FF when there is no signature to read
+        Byte        CC             TCallConv
+        PPTypeInfo  ResultType
+        Byte        ParamCount
+        TProcedureParam[ParamCount]
+
+    TProcedureParam is a Byte of TParamFlags, a PPTypeInfo, a ShortString name
+    and a TAttrData -- the same fields a method parameter has, minus the ParOff
+    that only a method needs.
+    """
+    ptr = r.layout.ptr_size
+    flags = r.u8(p)
+    if flags is None or flags == NO_SIGNATURE:
+        return None, p + 1
+    sig = {"flags": flags, "cc": CALL_CONVS.get(r.u8(p + 1), r.u8(p + 1)),
+           "result_type": r.ptr(p + 2), "params": []}
+    count = r.u8(p + 2 + ptr)
+    p += 3 + ptr
+    if count is None:
+        return sig, p
+    for _ in range(count):
+        pflags = r.u8(p)
+        name, q = r.shortstr(p + 1 + ptr)
+        end = _attrdata_end(r, q) if name is not None else None
+        if pflags is None or end is None:
+            return sig, p
+        sig["params"].append({
+            "flags": pflags,
+            "flag_names": [n for bit, n in PARAM_FLAGS if pflags & bit],
+            "type": r.ptr(p + 1), "name": name})
+        p = end
+    return sig, p
+
+
+def typeinfo_name(r, pptypeinfo):
+    """The type name behind a PPTypeInfo cell, without parsing the record.
+
+    Extended RTTI refers to a type by a cell holding a pointer to the record,
+    never by the record's own address, so reaching the name takes two
+    dereferences.  Only the kind byte and the ShortString after it are read:
+    a caller describing every parameter of every method in a binary asks this
+    tens of thousands of times, and parsing each record in full would parse
+    every published property of every class along with it.
+
+    A nil cell is not a failure. The compiler publishes no type for an
+    untyped `var` parameter or for the metaclass Self of a class method, and
+    None is the honest answer for those.
+    """
+    if not pptypeinfo or not r.is_mapped(pptypeinfo):
+        return None
+    ti = r.ptr(pptypeinfo)
+    if not ti or not r.is_mapped(ti):
+        return None
+    kind = r.u8(ti)
+    if not kind or kind not in TYPE_KINDS:
+        return None
+    name, _ = r.shortstr(ti + 1)
+    return name if is_identifier(name) else None
 
 
 def _parse_props(r, p):
@@ -491,7 +671,8 @@ class Vmt(object):
         self.instance_size = None
         self.parent = None           # parent VMT address (dereferenced)
         self.parent_ptr = None       # address of the PClass cell
-        self.methods = []            # published methods: name + address
+        self.methods = []            # classic method table: name + address
+        self.methods_ex = []         # extended method table, Delphi 2010+
         self.dynamic = []            # dynamic/message methods
         self.dynamic_table = None    # geometry of the table behind `dynamic`
         self.fields = []             # published fields
@@ -537,8 +718,107 @@ def parse_vmt(r, addr):
     return v
 
 
+#: Longest TAttrData blob accepted. Attribute blobs of several hundred bytes
+#: are ordinary -- System.Classes.TStrings.AddStrings publishes one -- so the
+#: cap only stops a length read out of unrelated bytes from swallowing a
+#: section.
+MAX_ATTR_DATA = 0x4000
+
+#: Extended entries accepted from one class before the table is called noise.
+#: The largest genuine table in the corpus holds 123.
+MAX_EX_METHODS = 4096
+
+
+def _attrdata_end(r, addr):
+    """One past the TAttrData blob at `addr`, or None if it is not one.
+
+    The blob leads with a Word holding its own total length, that Word
+    included, so an empty one is the two bytes `02 00`.  Reading the length
+    rather than assuming the empty shape is the whole reason the parameter
+    walk stays in step: a parser that steps a fixed two bytes is right only
+    until it meets a parameter or a method carrying an attribute, and stock
+    Delphi 12 emits method-level blobs of 281, 427 and 488 bytes.
+    """
+    n = r.u16(addr)
+    if n is None or not (2 <= n <= MAX_ATTR_DATA):
+        return None
+    return addr + n
+
+
+def parse_method_entry(r, addr):
+    """One TVmtMethodEntry, the record both method arrays are built out of.
+
+        Word        Len            total bytes of this entry, this Word included
+        Pointer     CodeAddress
+        ShortString Name
+        --- TVmtMethodEntryTail, present only when Len leaves room for it ---
+        Byte        Version
+        Byte        CC             TCallConv
+        PPTypeInfo  ResultType     nil for a procedure; two derefs to the record
+        SmallInt    ParOff
+        Byte        ParamCount
+        TVmtMethodParam[ParamCount]
+        TAttrData
+
+    Len is what makes the record self-checking: a tail walk that ends anywhere
+    other than exactly `addr + Len` read something that is not a method entry,
+    and `complete` reports that.  A classic table entry carries no tail at all
+    and is complete the moment the name ends on the declared boundary, which
+    is how the same function serves both arrays.
+
+    Returns None only when the head itself is not plausible, so a caller that
+    merely wants the name and address is not held hostage by the tail.
+    """
+    ptr = r.layout.ptr_size
+    size = r.u16(addr)
+    if size is None or size < 3 + ptr:          # Len, CodeAddress, empty name
+        return None
+    name, p = r.shortstr(addr + 2 + ptr)
+    if not is_identifier(name):
+        return None
+    m = {"addr": r.ptr(addr + 2), "name": name, "entry": addr, "size": size,
+         "end": addr + size, "complete": p == addr + size,
+         "cc": None, "result_type": None, "params": None}
+    if p >= addr + size:
+        return m
+
+    m["version"] = r.u8(p)
+    m["cc"] = CALL_CONVS.get(r.u8(p + 1), r.u8(p + 1))
+    m["result_type"] = r.ptr(p + 2)             # PPTypeInfo cell, or nil
+    m["par_off"] = r.i16(p + 2 + ptr)
+    count = r.u8(p + 4 + ptr)
+    p += 5 + ptr
+    if count is None:
+        return m
+
+    # TVmtMethodParam: Byte Flags, PPTypeInfo ParamType, Word ParOff,
+    # ShortString Name, TAttrData.  ParamType is nil for a parameter the
+    # compiler publishes no type for -- an untyped `var`, or the metaclass
+    # Self of a class method -- which is a fact about the declaration, not a
+    # gap to be filled in.
+    params = []
+    for _ in range(count):
+        flags = r.u8(p)
+        pname, q = r.shortstr(p + 3 + ptr)
+        if flags is None or pname is None:
+            return m
+        end = _attrdata_end(r, q)
+        if end is None:
+            return m
+        params.append({
+            "flags": flags,
+            "flag_names": [n for bit, n in PARAM_FLAGS if flags & bit],
+            "type": r.ptr(p + 1), "offset": r.u16(p + 1 + ptr),
+            "name": pname, "entry": p, "end": end})
+        p = end
+    m["params"] = params
+    m["complete"] = _attrdata_end(r, p) == addr + size
+    return m
+
+
 def _parse_method_table(r, v):
-    """Word count, then per entry: Word size, Pointer addr, ShortString name."""
+    """Word count, then that many TVmtMethodEntry records, then, from Delphi
+    2010, a Word ExCount and that many TVmtMethodExEntry records."""
     p = v.slots.get("vmtMethodTable")
     if not p or not r.is_mapped(p):
         return
@@ -548,16 +828,88 @@ def _parse_method_table(r, v):
         return
     p += 2
     for _ in range(count):
-        size = r.u16(p)
-        if size is None or size < 7:
+        m = parse_method_entry(r, p)
+        if m is None:
             return
-        addr = r.u32(p + 2)
-        name, _ = r.shortstr(p + 6)
-        if not is_identifier(name):
-            return
-        v.methods.append({"addr": addr, "name": name, "entry": p, "size": size})
-        p += size
+        v.methods.append(m)
+        p += m["size"]
     v.regions.append((start, p, "MethodTable"))
+    _parse_method_table_ex(r, v, p)
+
+
+def _parse_method_table_ex(r, v, p):
+    """The extended method array Delphi 2010 emits behind the classic one.
+
+        Pointer   Entry -> TVmtMethodEntry
+        Word      Flags          member kind, visibility and dispatch
+        SmallInt  VirtualIndex   signed slot index from the class pointer
+
+    VirtualIndex is an index, not an offset, and it is signed against the
+    class pointer, so slot -1 is the last word of the VMT header and slot 0
+    the first word past it.  That puts the standard TObject virtuals at -1
+    down to -n_virtuals -- a Delphi 10.1 TObject reports Destroy at -1 and
+    Equals at -11, exactly where `std_methods` places them -- and one below
+    the last of them, `no_slot_index`, is the sentinel for a method that
+    occupies no slot at all.  Flags says which of those readings applies; see
+    FLAG_VIRTUAL and the two beside it.
+
+    `p` is where the classic walk stopped, and that -- not a fixed offset from
+    the table -- is where ExCount lives.  Classic entries are variable length,
+    so reading the count at vmtMethodTable+2 is right only for the classes
+    whose classic count is zero.  That is most classes in a modern binary but
+    by no means all of them: three of the corpus's five Delphi 2010+ samples
+    have classes with classic entries in front of their extended array.
+
+    The stride is the pointer plus four, and the entries themselves are
+    emitted outside the table, so each one is claimed as its own region.  This
+    is where nearly all of a modern binary's method metadata is -- 4873
+    entries against six classic ones on a Delphi 12 service -- and leaving it
+    undeclared lets linear sweep disassemble it.
+
+    Nothing marks a pre-2010 table as having no extended array; the Word after
+    the classic entries then belongs to whatever the linker put next.  So the
+    array is taken only when every entry in it resolves to a TVmtMethodEntry
+    that parses, whose own Len accounts for exactly the bytes the walk
+    consumed, and whose code address lands in a code section.  Unrelated bytes
+    fail that on their first entry, and a partly plausible run is rejected
+    whole rather than contributing invented names.
+    """
+    count = r.u16(p)
+    if not count or count > MAX_EX_METHODS:
+        return
+    ptr = r.layout.ptr_size
+    table, q = p, p + 2
+    entries = []
+    for _ in range(count):
+        entry = r.ptr(q)
+        flags = r.u16(q + ptr)
+        if not entry or flags is None or not r.is_mapped(entry):
+            return
+        m = parse_method_entry(r, entry)
+        if m is None or not m["complete"] or not r.is_code(m["addr"]):
+            return
+        m["flags"] = flags
+        m["method_kind"] = flags & METHOD_KIND_MASK
+        m["virtual_index"] = r.i16(q + ptr + 2)
+        m["virtual"] = bool(flags & FLAG_VIRTUAL)
+        m["dynamic"] = bool(flags & FLAG_DYNAMIC)
+        m["abstract"] = bool(flags & FLAG_ABSTRACT)
+        # Flags and VirtualIndex have to corroborate each other: an entry
+        # dispatched neither through the vtable nor dynamically carries the
+        # sentinel index, and one that is dispatched carries a real index
+        # instead.  That holds for all 15,351 extended entries in the corpus,
+        # and it is a much sharper test of "are these two words really a
+        # TVmtMethodExEntry" than either field alone -- unrelated bytes have no
+        # reason to agree with each other.
+        if (m["virtual"] or m["dynamic"]) == (m["virtual_index"] ==
+                                              no_slot_index(r.layout)):
+            return
+        entries.append(m)
+        q += ptr + 4
+    v.methods_ex.extend(entries)
+    v.regions.append((table, q, "MethodTableEx"))
+    for m in entries:
+        v.regions.append((m["entry"], m["end"], "MethodEntry_" + m["name"]))
 
 
 def _parse_dynamic_table(r, v):
