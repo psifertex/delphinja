@@ -110,9 +110,15 @@ repairing databases analysed before the parser existed:
 5. **Comments** each record with its decoded contents — property list with
    accessor kinds, class ancestry, message table with resolved names.
 6. **Names functions** from published method tables, dynamic/message tables,
-   property accessors and the standard VMT slots. An address shared by several
-   classes is credited to the shallowest one in the hierarchy; genuine ties
-   between unrelated classes are left alone rather than guessed at.
+   property accessors and the standard VMT slots. From Delphi 2010 the
+   extended method array names two more things, because the `VirtualIndex`
+   beside each entry is a vtable slot index or a dynamic-dispatch id depending
+   on the flags next to it: a plain `dynamic` method gets the name it was
+   declared with rather than `DynMethod_m3`, and an override that publishes
+   nothing of its own is named from the slot its ancestor declared. An address
+   shared by several classes is credited to the shallowest one in the
+   hierarchy; genuine ties between unrelated classes are left alone rather
+   than guessed at.
 7. **Types `Self`** (the first parameter, EAX under Delphi's register
    convention) as the owning class, which is what makes field accesses in the
    decompiler render as named members.
@@ -126,10 +132,27 @@ methods and unit-level RTL procedures carry no metadata and require signatures.
 
 Delphi emits metadata for classes, published members and types. It emits
 nothing for unit-level procedures, and a VMT is a bare array of pointers with
-no parallel name table, so an ordinary virtual method's name exists nowhere in
-the binary. In the test binary 1205 code addresses are reachable from RTTI and
-636 can be named; the remainder are vtable slots with no anchor. Naming RTL
-routines like `Classes.ReadError` requires additional WARP signatures.
+no parallel name table, so an ordinary virtual method's name exists in the
+binary only where some class publishes an entry for its slot.
+
+How much that leaves depends entirely on the era, because Delphi 2010's
+extended method array publishes protected members too, and it is where a
+modern binary keeps almost all of its method metadata. Counting the code
+addresses any VMT points at — its own vtable slots, the standard `TObject`
+slots, both method arrays, the dynamic table, interface vtables and property
+accessors — and how many of them come out named:
+
+| Binary | Era | Reachable | Named |
+| --- | --- | --- | --- |
+| `corpus/innosetup/Compil32.exe` | Delphi 3 | 1290 | 759 (59%) |
+| `corpus/grid2htm/Demo.exe` | Delphi 5 | 2576 | 1254 (49%) |
+| `corpus/gh_delphidoom/Launcher.exe` | Delphi 7 | 1875 | 1024 (55%) |
+| `corpus/gh_ipconfig_gui/FastNetConfig.exe` | Delphi 2009 | 2375 | 1867 (79%) |
+| `corpus/gh_imagewriter/ImageWriterSvc.exe` | Delphi 12 | 7298 | 6064 (83%) |
+
+The remainder are vtable slots no class names: private members, and every
+protected one in a pre-2010 binary. Naming those, and RTL routines like
+`Classes.ReadError`, requires additional WARP signatures.
 
 ## Accuracy notes
 
