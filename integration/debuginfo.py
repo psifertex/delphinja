@@ -81,7 +81,7 @@ def parse_info(debug_info, bv, debug_file, progress):
             return False
         # Only on evidence -- see the note in workflow.py.
         if md.vmts:
-            signatures.register_delphi(TAG)
+            signatures.register_delphi(md.layout, TAG)
         signatures.register_fpc(bv, TAG)
 
         t0 = time.time()

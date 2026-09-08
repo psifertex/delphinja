@@ -99,7 +99,7 @@ def _recover(context):
         # Only on evidence: with no VMTs this is not a Delphi binary, and its
         # libraries cannot match.
         if md.vmts:
-            signatures.register_delphi(TAG)
+            signatures.register_delphi(md.layout, TAG)
         sink = sinks.AutoSink(bv, md)
         stats = A.Applier(md, {"undefine": False}, sink=sink).run()
         _state(bv).update(md=md, pending_self=list(sink.pending_self),

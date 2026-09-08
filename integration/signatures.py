@@ -136,10 +136,41 @@ def bundled():
                   if f.endswith(".warp"))
 
 
-def delphi_tags():
-    """Every Delphi knowledge base tag that ships a library."""
-    return [os.path.basename(p)[len("delphi-rtl-"):-len(".warp")]
-            for p in bundled() if os.path.basename(p).startswith("delphi-rtl-")]
+# The VMT layout is the one piece of version evidence a Delphi binary gives up
+# cheaply, and it names an era rather than a release: TObject gained virtual
+# slots at Delphi 3, at Delphi 4 and at Delphi 2009, and has not since. An era
+# is as far as that evidence goes -- but it is the narrowing that matters,
+# because the libraries that cost a match are the ones from a *different* era
+# claiming the same function GUID, and those are exactly what this rules out.
+#
+# Keyed on the standard TObject virtual slot count, which is what
+# `detect_layout` already measures. Four is Delphi 2, whose layout this build
+# cannot detect yet -- it has no vmtSelfPtr to anchor on -- and the entry is
+# here so that adding that layout does not also need a change here.
+DELPHI_ERAS = {
+    4: ["2"],
+    5: ["3"],
+    8: ["4", "5", "6", "7", "2005", "2006", "2007"],
+    11: ["2009", "2010", "2011", "2012", "2013", "2014"],
+    # Nothing ships past the 2014 knowledge base, so a later era gets the
+    # newest libraries rather than none: a near miss can still match, and no
+    # library at all certainly cannot.
+    14: ["2009", "2010", "2011", "2012", "2013", "2014"],
+}
+
+
+def delphi_tags(layout=None):
+    """The Delphi knowledge base tags to load for a binary of this layout.
+
+    With no layout -- a caller that has not scanned, or an era this build does
+    not recognise -- every shipped library is the honest answer. Loading one
+    that cannot match costs a lookup; failing to load one that could have
+    matched costs the match itself, so breadth is the safer failure.
+    """
+    shipped = [os.path.basename(p)[len("delphi-rtl-"):-len(".warp")]
+               for p in bundled() if os.path.basename(p).startswith("delphi-rtl-")]
+    era = DELPHI_ERAS.get(layout.n_virtuals) if layout is not None else None
+    return shipped if era is None else [t for t in shipped if t in era]
 
 
 def register_fpc(bv, tag="Delphinja"):
@@ -187,6 +218,12 @@ def register(tags, tag="Delphinja", kind="delphi"):
     return done
 
 
-def register_delphi(tag="Delphinja"):
-    """Register every bundled Delphi library."""
-    return register(delphi_tags(), tag)
+def register_delphi(layout=None, tag="Delphinja"):
+    """Register the bundled Delphi libraries that can match this binary.
+
+    `layout` is the one `detect_layout` settled on; passing it narrows fifteen
+    libraries to the era's own, which is the point of the selection this
+    module's docstring describes. Omitting it falls back to registering
+    everything, which is what a caller with no scan behind it can honestly do.
+    """
+    return register(delphi_tags(layout), tag)
