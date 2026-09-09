@@ -31,6 +31,27 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
 
 
+def class_of(name):
+    """The class component of an RTTI `Class.Member` name.
+
+    A generic instantiation writes its type arguments out in full, dots and
+    all -- `TList<System.Classes.TComponent>.Add` -- so the member boundary is
+    the last dot *outside* the angle brackets, not the first dot in the
+    string. Cutting at the first one yields `TList<System`, which can match
+    nothing, and scored every generic as a disagreement.
+    """
+    depth = 0
+    cut = -1
+    for i, ch in enumerate(name):
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            depth -= 1
+        elif ch == "." and depth == 0:
+            cut = i
+    return name if cut < 0 else name[:cut]
+
+
 def evaluate(path):
     from delphinja.rtti import apply as A
     out = {"file": os.path.basename(path), "size": os.path.getsize(path)}
@@ -64,7 +85,7 @@ def evaluate(path):
         wname = warped[addr].name
         # RTTI knows Class.Member; WARP knows Unit::Class::Member. Compare the
         # class component, which is the part both can see.
-        cls = rtti.split(".")[0]
+        cls = class_of(rtti)
         # Precedence matters here: without the parentheses this reads as
         # (cls and A) or B and the endswith test fires for every name.
         if cls and (("::%s::" % cls) in wname or wname.endswith("::" + cls)):
