@@ -91,6 +91,19 @@ files rather than an IDR knowledge base — and that half lives in
 `fpctypes.py`, `fpcgen.py`, `build_fpc.py`, `fpceval.py`). `types.py`,
 `naming.py` and `bnenv.py` are shared.
 
+## After XE6
+
+IDR's knowledge bases stop at XE6, so Delphi 10 Seattle through 13 Florence
+have no shipped artifact to build from at all. `delphi-rtl-xe2plus.warp` is
+built instead out of what modern binaries say about themselves: since Delphi
+2010 the extended method array beside each VMT names the RTL's public and
+published methods, so one name can be read out of many unrelated programs and
+kept only where they agree. That pipeline is [RTTI.md](RTTI.md), with its own
+modules (`rttikb.py`, `rttigen.py`, `build_rtti.py`); `naming.py` and
+`bnenv.py` are shared. It is a much narrower library than an IDR-derived one —
+no unit-level procedures, no private methods, no prototypes — because those
+carry no metadata to read.
+
 ## Modules
 
 | File | Contents |
@@ -105,6 +118,9 @@ files rather than an IDR knowledge base — and that half lives in
 | `tools/evaluate.py` | Corpus evaluation and precision measurement |
 | `tools/run.py` | CLI for a single knowledge base |
 | `tools/bnenv.py` | Scratch Binary Ninja user directory for batch runs |
+| `tools/rttikb.py` | Extended-RTTI consensus: naming, voting, set cover ([RTTI.md](RTTI.md)) |
+| `tools/rttigen.py` | Extended-RTTI harvest and `.warp` generation |
+| `tools/build_rtti.py` | Builds `delphi-rtl-xe2plus` from the corpus |
 
 ## Attribution
 

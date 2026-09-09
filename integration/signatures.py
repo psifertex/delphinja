@@ -147,15 +147,24 @@ def bundled():
 # `detect_layout` already measures. Four is Delphi 2, whose layout this build
 # cannot detect yet -- it has no vmtSelfPtr to anchor on -- and the entry is
 # here so that adding that layout does not also need a change here.
+#
+# `xe2plus` joins the eleven-slot era rather than replacing anything in it, and
+# joins the fourteen-slot entry for the same reason the entry exists at all --
+# no binary measured so far reports fourteen, and the mapping is here so that a
+# layout this build learns to detect does not also need a change here.
+#
+# It has to join rather than supersede, because Delphi has not changed the
+# standard virtual count since 2009: every release from XE2 to 13 measures as
+# eleven, and the era cannot tell a 2011 binary from a 2026 one. It costs the
+# six libraries beside it nothing: it is generated with every GUID they already
+# claim excluded, so it can never be the second claimant that makes the matcher
+# decline an otherwise good match. See tools/RTTI.md.
 DELPHI_ERAS = {
     4: ["2"],
     5: ["3"],
     8: ["4", "5", "6", "7", "2005", "2006", "2007"],
-    11: ["2009", "2010", "2011", "2012", "2013", "2014"],
-    # Nothing ships past the 2014 knowledge base, so a later era gets the
-    # newest libraries rather than none: a near miss can still match, and no
-    # library at all certainly cannot.
-    14: ["2009", "2010", "2011", "2012", "2013", "2014"],
+    11: ["2009", "2010", "2011", "2012", "2013", "2014", "xe2plus"],
+    14: ["2009", "2010", "2011", "2012", "2013", "2014", "xe2plus"],
 }
 
 
