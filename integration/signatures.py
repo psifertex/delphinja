@@ -159,12 +159,16 @@ def bundled():
 # six libraries beside it nothing: it is generated with every GUID they already
 # claim excluded, so it can never be the second claimant that makes the matcher
 # decline an otherwise good match. See tools/RTTI.md.
+#
+# `10.4` joins the same era on the same terms and is built on the same rule:
+# out of the 10.4 Sydney runtime packages' export tables, with every GUID any
+# already-shipped library claims excluded. See tools/BPL.md.
 DELPHI_ERAS = {
     4: ["2"],
     5: ["3"],
     8: ["4", "5", "6", "7", "2005", "2006", "2007"],
-    11: ["2009", "2010", "2011", "2012", "2013", "2014", "xe2plus"],
-    14: ["2009", "2010", "2011", "2012", "2013", "2014", "xe2plus"],
+    11: ["2009", "2010", "2011", "2012", "2013", "2014", "xe2plus", "10.4"],
+    14: ["2009", "2010", "2011", "2012", "2013", "2014", "xe2plus", "10.4"],
 }
 
 

@@ -104,6 +104,18 @@ modules (`rttikb.py`, `rttigen.py`, `build_rtti.py`); `naming.py` and
 no unit-level procedures, no private methods, no prototypes — because those
 carry no metadata to read.
 
+A fourth source closes most of that gap where a *runtime package* can be had.
+A `.bpl` is a DLL built from the same `.dcu` files a statically linked
+executable draws on, and it exports every interface symbol under a Borland
+mangled name that carries the unit, the class, the member and the argument
+list — so it reaches unit-level procedures and carries prototypes, neither of
+which extended RTTI can. It needs no staging and no relinking, because the
+compiler already laid the code out and wrote the relocations. That pipeline is
+[BPL.md](BPL.md), with its own modules (`bplkb.py`, `bplgen.py`,
+`build_bpl.py`, `bpleval.py`); `stage.py`'s thunk rule is shared. Its
+constraint is the input rather than the method: the packages have to come from
+somewhere.
+
 ## Modules
 
 | File | Contents |
@@ -121,6 +133,10 @@ carry no metadata to read.
 | `tools/rttikb.py` | Extended-RTTI consensus: naming, voting, set cover ([RTTI.md](RTTI.md)) |
 | `tools/rttigen.py` | Extended-RTTI harvest and `.warp` generation |
 | `tools/build_rtti.py` | Builds `delphi-rtl-xe2plus` from the corpus |
+| `tools/bplkb.py` | Runtime package reader: exports, `PACKAGEINFO`, naming ([BPL.md](BPL.md)) |
+| `tools/bplgen.py` | Package analysis, prototypes and `.warp` generation |
+| `tools/build_bpl.py` | Builds one library from a release's packages |
+| `tools/bpleval.py` | A package's export names against an independent library |
 
 ## Attribution
 
