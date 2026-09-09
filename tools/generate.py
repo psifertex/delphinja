@@ -23,7 +23,7 @@ from . import classes as dclasses
 from . import kb as kbmod
 from . import naming
 from . import stage
-from . import types as dtypes
+from . import delphitypes as dtypes
 
 SELECTED_TAG = "WARP: Selected Function"
 

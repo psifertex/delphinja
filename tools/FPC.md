@@ -93,7 +93,7 @@ would shift every register parameter.
 `globtype.pas` sets `pocall_default = pocall_register` on i386 and x86_64, but
 the name means different things on the two. On i386 it is the
 Borland-compatible register convention Binary Ninja calls `register`, the same
-one the Delphi libraries already emit, so `types.py` carries over. On x86_64
+one the Delphi libraries already emit, so `delphitypes.py` carries over. On x86_64
 the compiler routes every convention through `x86_64_use_ms_abi` for win64
 targets, so it is simply the Microsoft x64 ABI — `win64`. That also moves a
 hidden parameter: `insert_funcret_para`'s `paranr_result_leftright` branch is
@@ -108,7 +108,7 @@ with the wrong convention is not.
 * **Class layouts.** The Delphi side builds real structs from IDR type
   records; FPC's equivalent lives inside the `.ppu`, and a native reader for
   it is a version-locked project of its own. Class references therefore stay
-  `void*` — `types.py`'s existing shape heuristic. `ppudump -Fj` (from a
+  `void*` — `delphitypes.py`'s existing shape heuristic. `ppudump -Fj` (from a
   matching release) would supply them, and parameter names too, but it needs
   a matching-version FPC install, so nothing here depends on it.
 * **Anything outside the `rtl*` packages.** The full unit tree stages 113,738
@@ -183,7 +183,7 @@ the real configuration nor dies on the first analysis.
 | `tools/coff.py` | PE/COFF relocatable object reader (replaces `kb.py`) |
 | `tools/fpcname.py` | Demangler, hidden-parameter model, `.ppu` case oracle |
 | `tools/fpcstage.py` | Section layout and real relocation application |
-| `tools/fpctypes.py` | FPC type names and prototypes (extends `types.py`) |
+| `tools/fpctypes.py` | FPC type names and prototypes (extends `delphitypes.py`) |
 | `tools/fpcgen.py` | Analysis, naming and `.warp` generation |
 | `tools/build_fpc.py` | Fetches releases and builds every target |
 | `tools/fpceval.py` | Corpus evaluation with byte-level verification |

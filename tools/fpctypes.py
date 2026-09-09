@@ -20,7 +20,7 @@ the same Borland-compatible convention the Delphi libraries already emit.
 from binaryninja import FunctionParameter, Type
 
 from . import fpcname
-from .types import TypeMap
+from .delphitypes import TypeMap
 
 # `pocall_default = pocall_register` on both x86 architectures, but that name
 # means different things on each. On i386 it is the Borland-compatible

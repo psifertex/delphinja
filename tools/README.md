@@ -88,7 +88,7 @@ Everything above is the Delphi pipeline. Free Pascal binaries are built from
 the same four steps against a different source — a shipped FPC release's `.o`
 files rather than an IDR knowledge base — and that half lives in
 [FPC.md](FPC.md), with its own modules (`coff.py`, `fpcname.py`, `fpcstage.py`,
-`fpctypes.py`, `fpcgen.py`, `build_fpc.py`, `fpceval.py`). `types.py`,
+`fpctypes.py`, `fpcgen.py`, `build_fpc.py`, `fpceval.py`). `delphitypes.py`,
 `naming.py` and `bnenv.py` are shared.
 
 ## After XE6
@@ -110,7 +110,7 @@ carry no metadata to read.
 | --- | --- |
 | `tools/kb.py` | IDR knowledge base reader (format spec in the module docstring) |
 | `tools/stage.py` | Synthetic image staging and fixup relinking |
-| `tools/types.py` | Delphi type strings and calling conventions to Binary Ninja types |
+| `tools/delphitypes.py` | Delphi type strings and calling conventions to Binary Ninja types |
 | `tools/classes.py` | Real class structs from knowledge base type records |
 | `tools/naming.py` | The one naming convention |
 | `tools/generate.py` | Analysis, naming and `.warp` generation |
