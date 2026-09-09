@@ -118,6 +118,15 @@ DATA_SLOT_NAMES = [
     "vmtClassName", "vmtInstanceSize", "vmtParent",
 ]
 
+# The subset of those that address a table of this class's own. Everything else
+# in the header either is the class pointer, counts rather than addresses, or
+# points outside the class entirely -- see `_parse_vtable`, which bounds the
+# virtual table by the nearest of these.
+TABLE_SLOT_NAMES = [
+    "vmtIntfTable", "vmtAutoTable", "vmtInitTable", "vmtTypeInfo",
+    "vmtFieldTable", "vmtMethodTable", "vmtDynamicTable", "vmtClassName",
+]
+
 # The standard TObject virtual slots, newest first. Each era appends to the
 # END of this list conceptually -- new methods are inserted just after
 # vmtParent, pushing nothing -- so an era with N virtuals uses the LAST N
@@ -1023,10 +1032,27 @@ def _parse_intf_table(r, v):
 
 def _parse_vtable(r, v):
     """Walk forward from the class pointer while the dwords still look like
-    code addresses.  The first non-code dword ends the virtual table."""
+    code addresses.  The first non-code dword ends the virtual table.
+
+    "Looks like a code address" is not on its own enough to find the end. A
+    table that follows the vtable begins with count words, and two counts read
+    as one dword can land in the code section -- `TMarshal`'s method table does
+    exactly that, and the walk ran six bytes into it. Every table the header
+    points at is at a known address, though, so the nearest one above the class
+    pointer is a hard ceiling that no amount of plausible-looking data crosses.
+    """
+    # Only the slots that point at a table, and at the class pointer rather
+    # than past it: a class declaring no virtuals of its own has its first
+    # table sitting exactly there, which is `TMarshal`'s case and the one this
+    # bound exists for. vmtSelfPtr is excluded because it *is* the class
+    # pointer and would end the walk before it started; vmtInstanceSize is a
+    # count rather than an address, and vmtParent points at another class.
+    at_or_after = [v.slots.get(s) for s in TABLE_SLOT_NAMES]
+    at_or_after = [p for p in at_or_after if p and p >= v.addr]
+    ceiling = min(at_or_after) if at_or_after else None
     p = v.addr
     i = 0
-    while i < 4096:
+    while i < 4096 and (ceiling is None or p < ceiling):
         val = r.u32(p)
         if val is None or not r.is_mapped(val) or not r.is_code(val):
             break
