@@ -17,6 +17,19 @@ TAG = "delphinja"
 _BAD_CHARS = re.compile(r"[^A-Za-z0-9_.$]")
 
 
+def setting(key, default=True):
+    """A `delphinja.<key>` boolean, for a capability that has its own switch.
+
+    Settings are registered by the plugin's __init__, which is not imported
+    when this module is driven headless from the tools, so an unregistered key
+    is not an error -- it is a caller who never had a UI to set it in.
+    """
+    try:
+        return bn.Settings().get_bool("delphinja." + key)
+    except Exception:
+        return default
+
+
 #: How much of a literal's text goes into its data variable's name.
 STRING_NAME_CHARS = 24
 
@@ -34,6 +47,27 @@ def string_var_name(literal):
     if not label.strip("_."):
         label = "%x" % literal.addr
     return literal.kind + "_" + label
+
+
+# A short tag per managed type kind, for naming a field the binary gives no
+# name to. The Pascal type it stands for is on the VMT's comment; the tag is
+# only there so that two managed fields of one class read differently in the
+# struct and so that the kind is visible where the type is a bare pointer.
+_MANAGED_TAGS = {10: "LStr", 11: "WStr", 12: "Var", 13: "Arr", 14: "Rec",
+                 15: "Intf", 17: "DynArr", 18: "UStr", 22: "MRec"}
+
+
+def managed_field_name(field):
+    """A name for a managed field, which the metadata never names.
+
+    vmtInitTable lists what the compiler has to finalise and where, and
+    nothing else: no names, because the RTL walking this table at destruction
+    time has no use for one.  So the offset -- the one thing that is certainly
+    unique within the class -- names the field, and the kind tag says what it
+    is: `f1C_UStr`, `f20_Intf`.
+    """
+    return "f%X_%s" % (field["offset"],
+                       _MANAGED_TAGS.get(field["kind"], "Managed"))
 
 
 def sanitize(name, fallback="anon"):
@@ -153,11 +187,20 @@ class DelphiMetadata(object):
         """PPTypeInfo cell -> parsed TypeInfo."""
         if not pptypeinfo or not self.bv.is_valid_offset(pptypeinfo):
             return None
-        target = self.reader.u32(pptypeinfo)
-        ti = self.typeinfos.get(target)
-        if ti is None and target is not None:
-            ti = P.parse_typeinfo(self.reader, target)
-        return ti
+        return self.typeinfo_at(self.reader.u32(pptypeinfo))
+
+    def typeinfo_at(self, addr):
+        """TTypeInfo record address -> parsed TypeInfo.
+
+        The scan finds a record only where the compiler put a PPTypeInfo cell
+        in front of it, and the ones the init tables name have no such cell,
+        so falling back to parsing on demand is what makes those reachable at
+        all rather than an optimisation.
+        """
+        if not addr:
+            return None
+        ti = self.typeinfos.get(addr)
+        return ti if ti is not None else P.parse_typeinfo(self.reader, addr)
 
     UNIT_REGION_GAP = 0x80
 
@@ -364,6 +407,7 @@ class TypeFactory(object):
         self.owned = {}
         self.enums = 0
         self.structs = 0
+        self.inline_refused = []         # (vmt, managed field) left unplaced
         self._register_cc = False        # unresolved; None once looked up
 
     def qname(self, name):
@@ -439,6 +483,7 @@ class TypeFactory(object):
         contains it.
         """
         self.owned = {}
+        self.inline_refused = []
         for vmt in self.md.vmts.values():
             chain = self.md.class_chain(vmt)           # root first
             for offset, mname, mtype in self._members(vmt, class_props):
@@ -456,7 +501,17 @@ class TypeFactory(object):
                     offset, (mname, mtype))
 
     def _members(self, vmt, class_props):
-        """Published fields, plus the fields that published properties read."""
+        """Published fields, the fields published properties read, and the
+        managed fields vmtInitTable lists.
+
+        The three sources describe disjoint parts of the instance and none of
+        them is complete on its own.  The published field table carries only
+        class-typed fields -- the components dropped on a form -- and the
+        property accessors reach whatever a published property happens to read
+        directly.  Everything managed is in neither: a `string`, an interface
+        reference, a dynamic array or a Variant field is invisible to both,
+        which is every such member of every class.
+        """
         seen = {}
         for f in vmt.fields:
             cls = None
@@ -476,6 +531,24 @@ class TypeFactory(object):
                     continue
                 seen[value] = ("F" + sanitize(prop["Name"]),
                                self.prop_type(prop))
+
+        # Managed fields last, so a real backing-field name already found for
+        # an offset by either source above wins over a synthesised one: the
+        # init table carries no names at all, only types and offsets.
+        for f in vmt.managed:
+            if f["offset"] in seen:
+                continue
+            if f["inline"]:
+                # An inline record or array occupies as many bytes as its own
+                # type does, and this table does not say how many. Placing a
+                # member of a guessed width would overlap the field after it,
+                # so say so and place nothing.
+                self.inline_refused.append((vmt, f))
+                continue
+            # The record's own address: the parser has already followed
+            # whatever indirection this era's TypeRef carries.
+            ti = self.md.typeinfo_at(f["typeinfo"])
+            seen[f["offset"]] = (managed_field_name(f), self.rtti_type(ti))
         return sorted((off, n, t) for off, (n, t) in seen.items())
 
     # -- RTTI kind -> BN type ---------------------------------------------
@@ -745,14 +818,19 @@ class NameClaims(object):
 # -------------------------------------------------------------------- applier
 
 VMT_HEADER_TYPE = "TVmtHeader"
-# The eleven data slots. The virtual slots that follow them differ per era and
-# are appended from P.std_methods(), so this table stays era-independent.
-_VMT_DATA_FIELDS = [
-    ("SelfPtr", "void*"), ("IntfTable", "void*"), ("AutoTable", "void*"),
-    ("InitTable", "void*"), ("TypeInfo", "void*"), ("FieldTable", "void*"),
-    ("MethodTable", "void*"), ("DynamicTable", "void*"),
-    ("ClassName", "char*"), ("InstanceSize", "uint32"), ("Parent", "void*"),
-]
+# How each data slot is typed, keyed by slot name rather than by position:
+# which slots a header has differs per era -- Delphi 2 has neither vmtSelfPtr
+# nor vmtIntfTable -- so the layout says which of these to emit and in what
+# order, and a positional table would type a Delphi 2 header two slots out.
+# The virtual slots that follow are appended from P.std_methods() for the same
+# reason.
+_VMT_SLOT_TYPES = {
+    "vmtSelfPtr": "void*", "vmtIntfTable": "void*", "vmtAutoTable": "void*",
+    "vmtInitTable": "void*", "vmtTypeInfo": "void*", "vmtFieldTable": "void*",
+    "vmtMethodTable": "void*", "vmtDynamicTable": "void*",
+    "vmtClassName": "char*", "vmtInstanceSize": "uint32",
+    "vmtParent": "void*",
+}
 
 
 class Applier(object):
@@ -774,7 +852,9 @@ class Applier(object):
         self.stats = {"functions_removed": 0, "functions_named": 0,
                       "functions_created": 0, "data_vars": 0,
                       "comments": 0, "enums": 0, "structs": 0,
-                      "self_typed": 0, "name_conflicts": 0, "strings": 0}
+                      "self_typed": 0, "name_conflicts": 0, "strings": 0,
+                      "dfm_streams": 0, "dfm_events_bound": 0,
+                      "dfm_events_unbound": 0}
         self.log_lines = []
 
     def log(self, msg):
@@ -803,6 +883,11 @@ class Applier(object):
         if self.opt["types"]:
             self._define_vmt_header_type()
             self.factory.assign_members(class_props)
+            for vmt, f in self.factory.inline_refused:
+                self.log("%s: managed field at +0x%x is an inline %s (%s); "
+                         "its width is not in the metadata, so it is left "
+                         "unplaced" % (vmt.name, f["offset"], f["kind_name"],
+                                       f["type_name"]))
             for vmt in md.vmts.values():
                 try:
                     self.factory.class_type(vmt, class_props)
@@ -849,7 +934,9 @@ class Applier(object):
         sb.packed = True
         layout = self.md.layout
         ptr = Type.pointer(self.bv.arch, Type.void())
-        fields = _VMT_DATA_FIELDS + [(m, "code*") for _, m in P.std_methods(layout)]
+        fields = ([(slot[3:], _VMT_SLOT_TYPES[slot])
+                   for _, slot in P.data_slots(layout)] +
+                  [(m, "code*") for _, m in P.std_methods(layout)])
         for i, (fname, kind) in enumerate(fields):
             t = (Type.int(layout.ptr_size, False) if kind == "uint32"
                  else Type.pointer(self.bv.arch, Type.char()) if kind == "char*"
@@ -1330,6 +1417,15 @@ def describe_vmt(md, vmt):
              % (vmt.instance_size, len(vmt.virtuals))]
     for f in vmt.fields:
         lines.append("  field  +0x%-5x %s" % (f["offset"], f["name"]))
+    # The managed fields carry no name, so the comment is the only place their
+    # real Pascal type is written down: the struct member is named after its
+    # offset and typed structurally, and `TStringList` tells a reader far more
+    # than `void *` does.
+    for f in vmt.managed:
+        lines.append("  managed +0x%-4x %s: %s%s"
+                     % (f["offset"], managed_field_name(f), f["type_name"],
+                        "   (inline %s, left unplaced)" % f["kind_name"]
+                        if f["inline"] else ""))
     for m in vmt.methods:
         lines.append("  method 0x%08x %s" % (m["addr"], m["name"]))
     # The extended array repeats every classic entry as a record of its own,
@@ -1367,6 +1463,9 @@ def to_json(md):
             "instance_size": vmt.instance_size,
             "ancestry": [v.name for v in md.class_chain(vmt)],
             "fields": vmt.fields,
+            "managed": [{"offset": f["offset"], "name": managed_field_name(f),
+                         "kind": f["kind_name"], "type": f["type_name"],
+                         "placed": not f["inline"]} for f in vmt.managed],
             "methods": [{"name": m["name"], "addr": m["addr"]}
                         for m in vmt.methods],
             "methods_ex": [

@@ -118,6 +118,22 @@ DATA_SLOT_NAMES = [
     "vmtClassName", "vmtInstanceSize", "vmtParent",
 ]
 
+# Delphi 2's header is the same list with its first two slots absent, so the
+# rest keep their order and only their distance from the class pointer moves.
+# Interfaces arrive in Delphi 3, which is why there is no vmtIntfTable; the
+# self-pointer arrives with them, and its absence is what makes this era
+# invisible to a scanner built on that one test -- see `class_anchors`.
+#
+# Measured on innosetup/compil32_1.exe: nine data slots and four virtuals, so
+# the header is 52 bytes and the slots run -52 vmtAutoTable, -48 vmtInitTable,
+# -44 vmtTypeInfo, -40 vmtFieldTable, -36 vmtMethodTable, -32 vmtDynamicTable,
+# -28 vmtClassName, -24 vmtInstanceSize, -20 vmtParent.  Four independent
+# classes corroborate it: the record at -44 is a tkClass whose name matches the
+# class exactly, the instance sizes are right (TPersistent 4, TComponent $20,
+# TStringList $28) and the parent chain resolves.
+DATA_SLOT_NAMES_D2 = [name for name in DATA_SLOT_NAMES
+                      if name not in ("vmtSelfPtr", "vmtIntfTable")]
+
 # The subset of those that address a table of this class's own. Everything else
 # in the header either is the class pointer, counts rather than addresses, or
 # points outside the class entirely -- see `_parse_vtable`, which bounds the
@@ -146,7 +162,7 @@ VMT_HEADER_SIZE = 76        # Delphi 3 - 2007 only; prefer layout.header_size
 def data_slots(layout):
     """[(offset from the class pointer, slot name)] for this layout."""
     return [(-layout.header_size + i * layout.ptr_size, name)
-            for i, name in enumerate(DATA_SLOT_NAMES)]
+            for i, name in enumerate(layout.data_slot_names)]
 
 
 def std_methods(layout):
@@ -165,7 +181,7 @@ def std_methods(layout):
 
 def header_sizes(ptr_size=4):
     """Every plausible VMT header size, for probes that have no layout yet."""
-    return [(Layout.DATA_SLOTS + n) * ptr_size for n in Layout.VIRTUAL_COUNTS]
+    return sorted({layout.header_size for layout in Layout.variants(ptr_size)})
 
 
 class Layout(object):
@@ -175,30 +191,66 @@ class Layout(object):
     so a descriptor threaded through the reader covers every era without
     duplicating any parsing logic.
 
-    Every era keeps the same eleven data slots; what moved is the number of
-    standard TObject virtual slots that follow them, because TObject itself
-    gained virtual methods. Delphi 2 had five, Delphi 3 through 2007 have
-    eight, and 2009 onwards have eleven -- which is why a parser hardcoded to
-    a 76-byte header sees nothing at all in a modern binary, 32-bit included.
+    Two things move.  The number of standard TObject virtual slots grew as
+    TObject itself gained virtual methods -- five in early Delphi 3, eight
+    through 2007, eleven from 2009 -- which is why a parser hardcoded to a
+    76-byte header sees nothing at all in a modern binary, 32-bit included.
+    And Delphi 2 has two fewer data slots than everything after it, so for
+    that era even the slot *order* differs; see DATA_SLOT_NAMES_D2.
     """
 
-    #: standard TObject virtual slots by era
+    #: standard TObject virtual slots by era, for the eleven-slot header
     VIRTUAL_COUNTS = (5, 8, 11, 14)
-    DATA_SLOTS = 11
+    #: Delphi 2's, for the nine-slot one
+    D2_VIRTUALS = 4
 
-    def __init__(self, ptr_size=4, n_virtuals=8):
+    def __init__(self, ptr_size=4, n_virtuals=8, data_slot_names=None):
         self.ptr_size = ptr_size
         self.n_virtuals = n_virtuals
-        self.header_size = (self.DATA_SLOTS + n_virtuals) * ptr_size
+        self.data_slot_names = list(data_slot_names or DATA_SLOT_NAMES)
+        self.header_size = (len(self.data_slot_names) +
+                            n_virtuals) * ptr_size
+        self.has_self_ptr = "vmtSelfPtr" in self.data_slot_names
+        # Delphi 3 introduced a level of indirection that Delphi 2 does not
+        # have: every reference from one record to another became a cell
+        # holding the target's address rather than the address itself.
+        # vmtParent became a PClass, vmtTypeInfo a cell, and TManagedField's
+        # TypeRef the PPTypeInfo that the rest of this file dereferences
+        # twice.  It arrived with vmtSelfPtr and for the same reason -- the
+        # linker can then discard a record and leave the cell nil -- so the
+        # one slot decides both, and getting it wrong is silent: reading a
+        # Delphi 2 parent slot as a PClass dereferences the parent's first
+        # virtual method and finds no class at all.
+        self.indirect_refs = self.has_self_ptr
+
+    @classmethod
+    def variants(cls, ptr_size=4):
+        """Every dialect to try when nothing is known about the binary yet."""
+        return ([cls(ptr_size, cls.D2_VIRTUALS, DATA_SLOT_NAMES_D2)] +
+                [cls(ptr_size, n) for n in cls.VIRTUAL_COUNTS])
 
     def __repr__(self):
-        return "<Layout ptr=%d virtuals=%d header=%d>" % (
-            self.ptr_size, self.n_virtuals, self.header_size)
+        return "<Layout ptr=%d slots=%d virtuals=%d header=%d>" % (
+            self.ptr_size, len(self.data_slot_names), self.n_virtuals,
+            self.header_size)
+
+    def slot_offset(self, name):
+        """Offset of one data slot from the class pointer.
+
+        Asking the slot list rather than counting from vmtSelfPtr is what
+        keeps the eras apart: vmtClassName is the ninth slot from Delphi 3
+        onwards and the seventh in Delphi 2, and the difference is exactly the
+        two slots that era does not have.
+        """
+        return (self.data_slot_names.index(name) * self.ptr_size -
+                self.header_size)
 
     @property
     def class_name_offset(self):
-        """vmtClassName sits eight pointer slots past vmtSelfPtr in every era."""
-        return 8 * self.ptr_size
+        """vmtClassName's offset from the START of the header, not the class
+        pointer -- which is what the probes that have only a header address
+        can use."""
+        return self.slot_offset("vmtClassName") + self.header_size
 
 
 DEFAULT_LAYOUT = Layout()
@@ -218,12 +270,13 @@ def detect_layout(reader, ranges, window=0x40000, ptr_sizes=(4, 8)):
     best, best_score = None, 0
     for ptr_size in ptr_sizes:
         read = reader.u32 if ptr_size == 4 else reader.u64
-        layouts = [Layout(ptr_size, n) for n in Layout.VIRTUAL_COUNTS]
+        layouts = Layout.variants(ptr_size)
         # One pass over the window finds the self-referencing addresses for
         # every candidate header size at once; scoring then only touches those.
         by_size = {}
         for layout in layouts:
-            by_size.setdefault(layout.header_size, []).append(layout)
+            if layout.has_self_ptr:
+                by_size.setdefault(layout.header_size, []).append(layout)
         scores = {}
         for start, end in ranges:
             limit = min(end, start + window)
@@ -239,6 +292,21 @@ def detect_layout(reader, ranges, window=0x40000, ptr_sizes=(4, 8)):
                     name, _ = reader.shortstr(name_ptr)
                     if is_identifier(name):
                         scores[layout] = scores.get(layout, 0) + 1
+        # The eras with no self-pointer cannot be scored that way at all, so
+        # they are scored on the anchor they do have. Both scores count the
+        # same thing -- classes whose header reads as a class -- which is what
+        # makes them comparable, and the wrong-era score is not merely lower
+        # but zero: the shape test scores 0 on every one of the 97 corpus
+        # binaries that is not Delphi 2, because `linked_class_anchors`
+        # discards a candidate that is not part of a hierarchy.
+        for layout in layouts:
+            if layout.has_self_ptr:
+                continue
+            score = 0
+            for start, end in ranges:
+                score += len(linked_class_anchors(
+                    reader, start, min(end, start + window), layout))
+            scores[layout] = score
         for layout in layouts:
             score = scores.get(layout, 0)
             if score > best_score:
@@ -412,6 +480,165 @@ def is_identifier(text, min_len=1, max_len=255):
     # Ghidra plugin found and this one did not.
     return all(c.isalnum() or c in "_.$@<>,`[]" for c in text)
 
+
+# ------------------------------------------- VMTs that carry no self-pointer
+
+#: Shortest class name accepted from a header found by shape alone. A
+#: one-character ShortString is a length byte and one letter, which unrelated
+#: bytes produce constantly; no Delphi class is named that either.
+MIN_CLASS_NAME = 2
+
+#: Largest instance size accepted from such a header. Generous on purpose --
+#: innosetup's TLZMA1SmallDecompressor really is 65,640 bytes -- so this only
+#: stops an arbitrary dword from passing as a size.
+MAX_INSTANCE_SIZE = 0x100000
+
+
+def _class_head(r, addr, layout):
+    """Read the header at class pointer `addr` as a VMT, on shape alone.
+
+    Delphi 2 has no vmtSelfPtr, so there is no single word whose value proves
+    what these bytes are; what proves it is that several slots have to agree
+    with each other.  Three adjacent slots -- vmtClassName, vmtInstanceSize,
+    vmtParent -- plus the standard virtuals behind the header give five
+    independent conditions:
+
+      * vmtClassName points at a ShortString that reads as an identifier
+      * vmtInstanceSize is a plausible object size
+      * every standard virtual slot holds a code address
+      * vmtParent is nil, or points at a header that passes the first two
+        tests itself
+      * and if it does, the parent is no larger than the child, because a
+        descendant only ever adds fields
+
+    Returns {"name", "name_ptr", "instance_size", "parent"} or None.  `parent`
+    is the parent's class pointer: this era stores it directly rather than
+    through a PClass cell, so no dereference belongs here.
+    """
+    # Read at the candidate layout's width, not the reader's: detection asks
+    # this before any layout has been settled on.
+    ptr = layout.ptr_size
+    read = r.u32 if ptr == 4 else r.u64
+    name_ptr = read(addr + layout.slot_offset("vmtClassName"))
+    if not name_ptr or not r.is_mapped(name_ptr):
+        return None
+    name, _ = r.shortstr(name_ptr)
+    if not is_identifier(name, min_len=MIN_CLASS_NAME):
+        return None
+    size = read(addr + layout.slot_offset("vmtInstanceSize"))
+    if size is None or not (ptr <= size <= MAX_INSTANCE_SIZE):
+        return None
+    for i in range(layout.n_virtuals):
+        if not r.is_code(read(addr - (i + 1) * ptr)):
+            return None
+    parent = read(addr + layout.slot_offset("vmtParent"))
+    if parent:
+        if not r.is_mapped(parent):
+            return None
+        pname_ptr = read(parent + layout.slot_offset("vmtClassName"))
+        if not pname_ptr or not r.is_mapped(pname_ptr):
+            return None
+        pname, _ = r.shortstr(pname_ptr)
+        if not is_identifier(pname, min_len=MIN_CLASS_NAME):
+            return None
+        psize = read(parent + layout.slot_offset("vmtInstanceSize"))
+        if psize is None or not (ptr <= psize <= size):
+            return None
+    return {"name": name, "name_ptr": name_ptr, "instance_size": size,
+            "parent": parent}
+
+
+def class_anchors(r, start, end, layout):
+    """Yield (class pointer, head) for every plausible VMT in [start, end)
+    under a layout with no self-pointer to key on.
+
+    `_class_head` reads a dozen words and a ShortString, which is far too much
+    to spend on every address, so a cheap test picks the addresses worth
+    spending it on: vmtInstanceSize, a small positive integer where the great
+    majority of dwords in a code section are not.  That is one comparison per
+    candidate, made over the range as an array of machine integers for the
+    same reason `self_pointers` does it, and it leaves about one address in
+    fifty for the full check.
+
+    Only the prefilter reads the block; `_class_head` goes back through the
+    reader and reaches behind the candidate freely, so nothing is lost at a
+    block boundary and the blocks do not need to overlap.
+    """
+    ptr = layout.ptr_size
+    typecode = _TYPECODES.get(ptr)
+    # vmtInstanceSize is one slot past vmtClassName in every era, so this one
+    # word locates the whole header.
+    size_off = layout.slot_offset("vmtInstanceSize")
+    for base in range(start, end, _CHUNK):
+        stop = min(base + _CHUNK, end)
+        data = r.bytes(base, stop - base) if typecode else b""
+        if len(data) != stop - base:
+            addrs = range(base, stop, ptr)
+        else:
+            count = len(data) // ptr
+            words = memoryview(data)[:ptr * count].cast(typecode)
+            addrs = [base + ptr * i for i in range(count)
+                     if ptr <= words[i] <= MAX_INSTANCE_SIZE]
+        for addr in addrs:
+            head = _class_head(r, addr - size_off, layout)
+            if head is not None:
+                yield addr - size_off, head
+
+
+def linked_class_anchors(r, start, end, layout):
+    """`class_anchors` reduced to the candidates that form a hierarchy.
+
+    A single header-shaped run of words happens by accident all the time: 91
+    of the 97 binaries in the corpus that are not Delphi 2 contain one, 92 in
+    all, and they are indistinguishable one at a time -- the commonest is the
+    RTL's own TObject header, whose class name, instance size and parent slots
+    sit adjacent in every era too, just at a different distance.
+
+    A class *hierarchy* does not happen by accident.  Every class but TObject
+    names its parent, and that parent is another class in the same image, so
+    genuine candidates form a connected forest while a coincidence stands
+    alone.  Keeping only the candidates that name another candidate as parent
+    or are named by one is the whole difference between a clean answer and a
+    wrong one: it discards all 92 of those accidents, and of the 1,058
+    genuine classes across the 23 Delphi 2 binaries it discards none.
+    """
+    heads = dict(class_anchors(r, start, end, layout))
+    linked = set()
+    for addr, head in heads.items():
+        if head["parent"] in heads:
+            linked.add(addr)
+            linked.add(head["parent"])
+    return sorted(linked)
+
+
+def find_vmt(r, ranges, limit=None):
+    """The first VMT in `ranges`, under whichever dialect finds one.
+
+    Eligibility probes need this and have no layout yet, so every variant is
+    tried and the reader's own layout is restored afterwards.  Trying only the
+    self-pointer anchor is what made a Delphi 2 binary answer "not Delphi" and
+    skip recovery entirely -- including the string constants the parser can
+    already read out of it without any VMT at all.
+    """
+    saved = r.layout
+    try:
+        for layout in Layout.variants(r.ptr_size):
+            r.layout = layout
+            for start, end in ranges:
+                stop = end if limit is None else min(end, start + limit)
+                if layout.has_self_ptr:
+                    anchors = (r.ptr(a) for a in self_pointers(
+                        r, start, stop, (layout.header_size,),
+                        step=layout.ptr_size, width=layout.ptr_size))
+                else:
+                    anchors = linked_class_anchors(r, start, stop, layout)
+                for addr in anchors:
+                    v = parse_vmt(r, addr)
+                    if v is not None:
+                        return v
+    finally:
+        r.layout = saved
+    return None
 
 
 def _unitname(r, p):
@@ -686,6 +913,8 @@ class Vmt(object):
         self.dynamic_table = None    # geometry of the table behind `dynamic`
         self.fields = []             # published fields
         self.field_classes = []      # class table backing the field list
+        self.managed = []            # managed fields, from vmtInitTable
+        self.init_table = None       # geometry of the table behind `managed`
         self.interfaces = []
         self.virtuals = []           # (slot_index, address) beyond -4
         self.vtable_end = addr       # one past the last virtual slot
@@ -698,27 +927,39 @@ class Vmt(object):
 def parse_vmt(r, addr):
     """Parse the VMT whose class pointer is `addr`.  None if it is not one."""
     layout = r.layout
-    if r.ptr(addr - layout.header_size) != addr:        # vmtSelfPtr must self-ref
-        return None
-    name_ptr = r.ptr(addr - layout.header_size + layout.class_name_offset)
-    if name_ptr is None or not r.is_mapped(name_ptr):
-        return None
-    name, _ = r.shortstr(name_ptr)
-    if not is_identifier(name):
-        return None
+    if layout.has_self_ptr:
+        if r.ptr(addr - layout.header_size) != addr:    # vmtSelfPtr self-refs
+            return None
+        name_ptr = r.ptr(addr - layout.header_size + layout.class_name_offset)
+        if name_ptr is None or not r.is_mapped(name_ptr):
+            return None
+        name, _ = r.shortstr(name_ptr)
+        if not is_identifier(name):
+            return None
+    else:
+        # Delphi 2 keeps no self-pointer, so there is no one word to test;
+        # the header has to prove itself by shape.
+        head = _class_head(r, addr, layout)
+        if head is None:
+            return None
+        name, name_ptr = head["name"], head["name_ptr"]
 
     v = Vmt(addr, layout)
     v.name = name
     for off, slot in data_slots(layout):
         v.slots[slot] = r.ptr(addr + off)
     v.instance_size = v.slots["vmtInstanceSize"]
-    v.parent_ptr = addr - layout.header_size + 10 * layout.ptr_size
+    v.parent_ptr = addr + layout.slot_offset("vmtParent")
     pp = v.slots["vmtParent"]
     if pp and r.is_mapped(pp):
-        v.parent = r.u32(pp)
+        # A PClass cell from Delphi 3 on, the parent's class pointer itself
+        # before that.  Dereferencing a Delphi 2 parent slot reads the parent's
+        # first virtual method and loses the whole hierarchy.
+        v.parent = r.u32(pp) if layout.indirect_refs else pp
 
     v.regions.append((name_ptr, name_ptr + 1 + len(name), "ClassName"))
 
+    _parse_init_table(r, v)
     _parse_method_table(r, v)
     _parse_dynamic_table(r, v)
     _parse_field_table(r, v)
@@ -823,6 +1064,135 @@ def parse_method_entry(r, addr):
     m["params"] = params
     m["complete"] = _attrdata_end(r, p) == addr + size
     return m
+
+
+# The type kinds a field can have and still need the compiler's help to be
+# created and destroyed. Those are exactly the fields vmtInitTable lists, and
+# exactly the ones the published field table cannot describe: it carries only
+# class-typed fields, so without this table every string, interface, dynamic
+# array and Variant member of every class is missing from the struct.
+MANAGED_KINDS = frozenset((10, 11, 12, 13, 14, 15, 17, 18, 22))
+
+# The three of those that are stored inline in the instance rather than as one
+# pointer-sized cell. Their size is not something this table says -- an inline
+# tkArray of records occupies whatever its element type does, times its length
+# -- so a member placed for one would overlap whatever follows it. They are
+# accepted as evidence that the table parsed and then left unplaced.
+INLINE_KINDS = frozenset((13, 14, 22))
+
+#: Managed fields accepted from one class before the table is called noise.
+MAX_MANAGED_FIELDS = 4096
+
+
+def _managed_fields(r, p, count, instance_size, ptr):
+    """Read `count` TManagedField records at `p`, or None if they are not.
+
+        PPTypeInfo  TypeRef     two dereferences to the record, as everywhere
+        NativeUInt  FldOffset
+
+    Delphi 2 spells TypeRef as a plain PTypeInfo, one dereference, the same way
+    it spells vmtParent and vmtTypeInfo; `Layout.indirect_refs` is that whole
+    difference and reading it the modern way there lands on the first four
+    bytes of the type's name.
+
+    Every entry has to pass or the whole array is rejected.  There is no
+    length or checksum on this table, and it is reached from a slot that is
+    nil in most classes, so a half-plausible run is exactly what a wrongly
+    guessed TTypeData shape produces -- and one accepted from the wrong offset
+    would place a `string` member over the middle of a real field.
+
+    The offset must land inside the instance and past the class pointer at
+    offset zero, and the offsets must ascend: the compiler emits this list in
+    field order, which held for every one of the 15,192 Delphi 3-and-later
+    entries measured across the corpus without exception, and is one more
+    thing unrelated bytes have no reason to do.
+    """
+    indirect = r.layout.indirect_refs
+    fields = []
+    last = -1
+    for _ in range(count):
+        ref = r.ptr(p)
+        offset = r.ptr(p + ptr)
+        if not ref or not r.is_mapped(ref):
+            return None
+        ti = r.ptr(ref) if indirect else ref
+        if not ti or not r.is_mapped(ti):
+            return None
+        kind = r.u8(ti)
+        if kind not in MANAGED_KINDS:
+            return None
+        # The name is read only to confirm a TTypeInfo is really there. It is
+        # not required to be a Delphi identifier: the compiler names an
+        # anonymous type after where it was declared, so the type of an
+        # `array of T` field of TApplication is called ':TApplication.:1' and
+        # the comparer inside a TList<T> ':{Generics.Collections}TList<...>.:1'.
+        # Demanding an identifier rejected 346 otherwise perfect tables.
+        name, _ = r.shortstr(ti + 1)
+        if not name or not all(0x20 <= ord(c) < 0x7F for c in name):
+            return None
+        if offset is None or not (ptr <= offset < instance_size):
+            return None
+        if offset <= last:
+            return None
+        last = offset
+        fields.append({"typeref": ref, "typeinfo": ti, "kind": kind,
+                       "kind_name": TYPE_KINDS[kind], "type_name": name,
+                       "offset": offset, "inline": kind in INLINE_KINDS,
+                       "entry": p})
+        p += 2 * ptr
+    return fields
+
+
+def _parse_init_table(r, v):
+    """The managed fields, out of the record type vmtInitTable names.
+
+    The slot points straight at a TTypeInfo, not at a PPTypeInfo cell, and the
+    record describes the instance as a record: kind tkRecord, or tkMRecord
+    once Delphi 10.4 gave records operators. Its name is empty for a class, so
+    it is read and discarded; the TTypeData behind it is what matters.
+
+    That TTypeData has two shapes in the wild, and nothing in the record says
+    which one this is:
+
+        A   DWord Size; DWord Count; entries at +8
+        B   Word  ?;     DWord Size; DWord Count; entries at +10
+
+    So both are tried and the entry array is validated in full under each
+    before either is accepted, exactly as `parse_string` does for the two
+    string-constant headers.  The shapes are not ambiguous in practice --
+    across 9,388 classes in the corpus shape A accounts for 9,293 and shape B
+    for none, and no class validates under both -- but "in practice" is what
+    trying and checking is for; a version that emits B costs nothing here and
+    would otherwise cost every managed field in the binary.
+    """
+    p = v.slots.get("vmtInitTable")
+    if not p or not r.is_mapped(p):
+        return
+    if r.u8(p) not in (14, 22):
+        return
+    name, q = r.shortstr(p + 1)  # the record's own name; empty for a class
+    if name is None:
+        return
+    ptr = r.layout.ptr_size
+    size = v.instance_size or 0
+    for head in (0, 2):
+        base = q + head
+        count = r.u32(base + 4)
+        if count is None or not (0 < count <= MAX_MANAGED_FIELDS):
+            continue
+        fields = _managed_fields(r, base + 8, count, size, ptr)
+        if fields is None:
+            continue
+        v.managed.extend(fields)
+        end = base + 8 + count * 2 * ptr
+        v.init_table = {"addr": p, "count": count, "entries": base + 8,
+                        "rec_size": r.u32(base), "end": end}
+        # The whole record, kind byte to last entry. Nothing else claims it --
+        # these tables have no PPTypeInfo cell in front of them, so the
+        # TypeInfo scan never sees one, and all 9,293 in the corpus are bytes
+        # the sweep is otherwise free to disassemble.
+        v.regions.append((p, end, "InitTable"))
+        return
 
 
 def _parse_method_table(r, v):
@@ -1067,19 +1437,26 @@ def _parse_vtable(r, v):
 def scan(r, start, end, progress=None):
     """Find every VMT and TTypeInfo record in [start, end).
 
-    Both structures have a self-referencing pointer that makes them cheap and
-    almost false-positive free to spot: a VMT stores its own address one header
-    back, at whatever distance this layout puts it, and the compiler emits each
-    TTypeInfo behind a PPTypeInfo cell that points four bytes ahead at the
-    record itself.
+    A TTypeInfo record always has a self-referencing pointer that makes it
+    cheap and almost false-positive free to spot: the compiler emits each one
+    behind a PPTypeInfo cell that points four bytes ahead at the record
+    itself.  From Delphi 3 a VMT announces itself the same way, storing its
+    own address one header back at whatever distance this layout puts it, so
+    one pass over the range finds both.
 
     Finding those pointers is `self_pointers`' job; parsing what they point at
     happens here, on the handful of addresses that survive. The range is
     walked in chunks so a caller with a progress callback can watch it, and
     cancel it, part way through.
+
+    Delphi 2 has no such pointer in its VMTs, so that era needs a second pass
+    keyed on the header's shape instead -- see `linked_class_anchors`.  It is
+    a pass this scan does not want to pay for otherwise, and does not have to:
+    which of the two applies is a property of the layout, already settled.
     """
     header_size = r.layout.header_size
-    candidates = (header_size, 4)
+    self_ptr = r.layout.has_self_ptr
+    candidates = (header_size, 4) if self_ptr else (4,)
     vmts, typeinfos = {}, {}
     step = max(1, (end - start) // 100)
     for chunk in range(start, end, step):
@@ -1087,7 +1464,7 @@ def scan(r, start, end, progress=None):
             break
         for addr in self_pointers(r, chunk, min(chunk + step, end), candidates):
             val = r.u32(addr)
-            if val == addr + header_size:
+            if self_ptr and val == addr + header_size:
                 v = parse_vmt(r, val)
                 if v:
                     vmts[v.addr] = v
@@ -1096,6 +1473,11 @@ def scan(r, start, end, progress=None):
                 if ti:
                     ti.ptr_addr = addr
                     typeinfos[ti.addr] = ti
+    if not self_ptr:
+        for addr in linked_class_anchors(r, start, end, r.layout):
+            v = parse_vmt(r, addr)
+            if v:
+                vmts[v.addr] = v
     return vmts, typeinfos
 
 

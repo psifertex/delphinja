@@ -13,9 +13,12 @@ Binary Ninja workflow for Delphi and the Visual Component Library (VCL). Include
   strips the symbols from. These ship with the plugin and are loaded when a
   Delphi binary is recognised, so nothing has to be copied into a signature
   directory.
-Delphi 2 through 10.x are supported, and Free Pascal 2.6 through 3.2. The VMT
+Delphi 2 through 13 are supported, and Free Pascal 2.6 through 3.2. The VMT
 layout is detected per binary, and every offset is derived from it rather than
-written down, which is what lets one build read every version.
+written down, which is what lets one build read every version. Delphi 2 is the
+one era whose VMT keeps no self-pointer to be found by, so its classes are
+recognised by the shape of the header instead; every version after it
+announces itself.
 
 ## What it looks like
 
@@ -51,6 +54,8 @@ matches, and 1,226 comments recovered.
 Further reading:
 
 - [tools/README.md](tools/README.md) -- how the shipped signature libraries are built.
+- [docs/DFM.md](docs/DFM.md) -- the compiled form stream format, and how event
+  handlers are bound to the controls that raise them.
 
 ## How it runs
 
@@ -122,6 +127,13 @@ repairing databases analysed before the parser existed:
 7. **Types `Self`** (the first parameter, EAX under Delphi's register
    convention) as the owning class, which is what makes field accesses in the
    decompiler render as named members.
+8. **Binds VCL event handlers to the controls that raise them.** A compiled
+   form (DFM) stream names the method behind every `OnClick`, `OnCreate` and
+   `OnKeyPress` the designer wired up; that name is resolved in the form
+   class's published method table and the handler is commented with the
+   control and event that reach it — `DFM: lblEmail: TLabel.OnMouseEnter`. The
+   event's declared type is recovered too, so the comment carries
+   `TNotifyEvent(Sender: TObject)`. See [docs/DFM.md](docs/DFM.md).
 
 ## What metadata cannot reach
 
@@ -168,6 +180,7 @@ table is visible and reversible. Edit the table freely.
 | File | Contents |
 | --- | --- |
 | `rtti/parser.py` | Pure decoding. Reaches the binary only through a `Reader`, so it runs headless against a raw portable executable (PE) as easily as against a `BinaryView`. |
+| `rtti/dfm.py` | The compiled form (DFM) stream format, and binding each control's event properties to the form method that handles them. Pure decoding like `parser.py`, and runs headless for the same reason. |
 | `rtti/messages.py` | Message-id name tables for dynamic method dispatch |
 | `rtti/sinks.py` | Where recovered facts get written. `ViewSink` mutates a BinaryView; `DebugInfoSink` contributes to a DebugInfo container. The recovery logic is destination-agnostic. |
 | `rtti/apply.py` | Scanning, type construction, name claiming — everything shared by both destinations |

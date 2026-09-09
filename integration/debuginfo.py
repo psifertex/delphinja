@@ -31,24 +31,16 @@ PROBE_LIMIT = 0x40000
 def _probe(bv):
     """Cheap early-exit search for one plausible VMT.
 
-    A VMT stores its own address one header back, which is a single dword
-    compare per candidate, and Delphi emits the System unit's VMTs at the very
-    start of the code section -- so a real Delphi binary answers almost
-    immediately.
+    From Delphi 3 a VMT stores its own address one header back, which is a
+    single dword compare per candidate, and Delphi emits the System unit's VMTs
+    at the very start of the code section -- so a real Delphi binary answers
+    almost immediately.  `find_vmt` tries every era's anchor, including the
+    Delphi 2 header that has no self-pointer to compare against at all.
     """
     if signatures.fpc_version(bv) is not None:
         return True                 # Free Pascal: no VMTs, but libraries to load
     md = A.DelphiMetadata(bv)
-    # Every era's header size, not just the 76-byte one: a Delphi 2009 binary
-    # puts its self-pointer 88 bytes back, and probing only for 76 answers
-    # "not Delphi" for the whole modern range.
-    sizes = P.header_sizes()
-    for start, end in md._code_ranges:
-        limit = min(end, start + PROBE_LIMIT)
-        for addr in P.self_pointers(md.reader, start, limit, sizes):
-            if P.parse_vmt(md.reader, md.reader.u32(addr)) is not None:
-                return True
-    return False
+    return P.find_vmt(md.reader, md._code_ranges, PROBE_LIMIT) is not None
 
 
 def is_valid(bv):
