@@ -196,6 +196,12 @@ for _key, _title, _desc in (
          "Demangle Borland/Delphi symbol names."),
         ("commands", "Delphi Plugin Commands",
          "Register the Delphi menu commands."),
+        ("dfm", "VCL Form Streams",
+         "Find the compiled form (DFM) streams and bind each control's event "
+         "properties to the form class's published method that handles them, "
+         "naming that method and commenting it with the control and event "
+         "that reach it. Costs one pass over the file's readable segments -- "
+         "the only part of the plugin that looks outside the code sections."),
         ("signatures", "Bundled WARP Signatures",
          "Load the bundled Delphi runtime signature libraries on demand, "
          "choosing the ones that match the binary being analysed. Turn off "

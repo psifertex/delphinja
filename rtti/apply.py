@@ -9,6 +9,7 @@ from binaryninja import (BinaryView, Symbol, SymbolType, Type,
                          StructureBuilder, BaseStructure,
                          NamedTypeReferenceClass)
 
+from . import dfm
 from . import messages
 from . import parser as P
 from . import sinks
@@ -845,6 +846,12 @@ class Applier(object):
             "comments": True,
             "rename_functions": True,
             "self_param": True,
+            # Form streams live in the resource directory, so recovering them
+            # is a pass over the whole file rather than over the code sections
+            # the rest of this works on. Its own switch, defaulting to the
+            # registered setting, so its cost and its results can be
+            # attributed on their own.
+            "dfm_events": setting("dfm"),
         }
         self.opt.update(options or {})
         self.sink = sink or sinks.ViewSink(md.bv, md)
@@ -1091,9 +1098,51 @@ class Applier(object):
                     elif kind == "virtual":
                         self._claim_virtual(claims, vmt, value, verb, pname)
 
+        self._claim_dfm(claims)
         for addr, name, owner, register_cc, kind in claims.resolved():
             self._name_function(addr, name, owner, register_cc, kind)
         self.stats["name_conflicts"] = claims.conflicts
+
+    def _claim_dfm(self, claims):
+        """Bind the form streams' event handlers to the code they name.
+
+        The published method table has already claimed most of these
+        addresses under the same name -- a handler is a published method, or
+        the runtime could not resolve it -- so the claims settle rather than
+        conflict, and what the form stream adds is the part no table carries:
+        *which control and which event* reaches this code.  That goes in the
+        comment.
+
+        Accumulated, not overwritten.  One handler is routinely shared by a
+        toolbar button, a menu item and an accelerator, and each of the three
+        is a fact about the function; keeping only the last read would throw
+        two of them away, and re-running the plugin over a database would
+        churn the comment rather than converge.
+        """
+        if not self.opt["dfm_events"]:
+            return
+        md = self.md
+        streams = dfm.find_streams(md.reader, dfm.view_ranges(self.bv))
+        bindings, unbound = dfm.bind(md, streams)
+        self.stats["dfm_streams"] = len(streams)
+        self.stats["dfm_events_bound"] = len(bindings)
+        self.stats["dfm_events_unbound"] = len(unbound)
+        lines = {}
+        for b in bindings:
+            claims.claim(b.addr, "%s.%s" % (sanitize(b.form_vmt.name),
+                                            sanitize(b.handler)),
+                         len(md.class_chain(b.form_vmt)), b.form_vmt.addr)
+            lines.setdefault(b.addr, []).append(b.comment())
+        for addr, texts in sorted(lines.items()):
+            try:
+                have = self.bv.get_comment_at(addr) or ""
+            except Exception:
+                have = ""
+            merged = [l for l in have.split("\n") if l] + texts
+            self._comment(addr, "\n".join(dict.fromkeys(merged)))
+        if streams:
+            self.log("%d form streams, %d event handlers bound, %d unbound"
+                     % (len(streams), len(bindings), len(unbound)))
 
     def _declared_indices(self, key):
         """class address -> {VirtualIndex: name} over the entries `key` picks.
