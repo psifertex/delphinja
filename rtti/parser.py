@@ -5,6 +5,8 @@ through a `Reader`, so the same code runs headless against a raw PE or inside
 the plugin against a BinaryView.
 """
 
+import bisect
+import re
 import struct
 
 # ---------------------------------------------------------------- primitives
@@ -222,6 +224,13 @@ class Layout(object):
         # Delphi 2 parent slot as a PClass dereferences the parent's first
         # virtual method and finds no class at all.
         self.indirect_refs = self.has_self_ptr
+        # Delphi 2009 is the release that made `string` UnicodeString, and it
+        # is the same release that gave TObject Equals, GetHashCode and
+        # ToString -- eleven standard virtuals where 2007 had eight.  The
+        # virtual count therefore dates the binary precisely enough to say
+        # whether UTF-16 constants exist in it at all, which is what keeps a
+        # Delphi 3 scan from paying for a wide pass that cannot match.
+        self.wide_strings = n_virtuals >= 11
 
     @classmethod
     def variants(cls, ptr_size=4):
@@ -1697,6 +1706,337 @@ def cluster(addrs, gap=0x200):
             cs, ce = s, e
     out.append((cs, ce))
     return out
+
+
+# ------------------------------------------------ header-less string constants
+
+#: Shortest header-less literal accepted, in characters.
+#:
+#: Six, not five, and the difference is not a matter of taste.  At five the
+#: rule accepts `SVWUj` at 0x40c924 of ImageWriterSvc and 0x40ca00 of
+#: DX.HttpDiag: `53 56 57 55 6A 00` is `push ebx; push esi; push edi;
+#: push ebp; push 0`, a Delphi function prologue whose `push 0` supplies its
+#: own terminator, at a dword-aligned function entry that genuinely is the
+#: target of a `mov ebx, 0x40c924`.  Neither the alignment test nor the
+#: reference test rejects it, so the length is the only thing that does, and
+#: declaring it would put a data variable over a function entry -- deleting
+#: the function, where the caller undefines what metadata covers.
+MIN_HEADERLESS_CHARS = 6
+
+#: Highest byte a header-less literal's body may contain.
+#:
+#: `is_string_text` accepts all of Latin-1, and can afford to: the record it
+#: validates is anchored on a refcount of -1 and a length that has to agree
+#: with the terminator, so the body is corroborated before it is read.  A
+#: header-less run is corroborated by nothing, and Latin-1 is most of the
+#: x86 opcode map.  Allowing it accepted 254 runs in Demo.exe where ASCII
+#: accepts 83, and what the other 171 were is not ambiguous:
+#: `U 8B EC 33 C0 55 68 <offset>` -- `push ebp; mov ebp, esp;
+#: xor eax, eax; push ebp; push offset` -- is the standard Delphi SEH
+#: prologue, dword aligned because it is a function entry and referenced
+#: because the `push offset` two instructions in names its own handler.  Held
+#: to ASCII the same prologue is not a run at all: 0x8B is not text.
+MAX_HEADERLESS_BYTE = 0x7E
+
+
+def is_headerless_text_byte(c):
+    """Is `c` a byte a header-less constant's body may hold?"""
+    return c in STRING_CONTROLS or 0x20 <= c <= MAX_HEADERLESS_BYTE
+
+
+def is_headerless_text(raw):
+    """The whole-body form of `is_headerless_text_byte`."""
+    return all(is_headerless_text_byte(c) for c in raw)
+
+
+#: The bytes a header-less body may contain, as a regex class.
+_TEXT_CLASS = (b"".join(b"\\x%02x" % c for c in sorted(STRING_CONTROLS)) +
+               b"\\x20-\\x%02x" % MAX_HEADERLESS_BYTE)
+
+#: What one UTF-16 code unit is, for the wide scan: body character, NUL
+#: terminator, or neither.  Two tables rather than one predicate because the
+#: scan classifies a whole section at a time by translating its low and high
+#: byte planes; see `_wide_units`.
+#:
+#: The low byte is held to the same ASCII rule as a narrow body, and the high
+#: byte must be zero.  Admitting U+0100 and above would cost far more than it
+#: bought: a pair of ASCII bytes read as one code unit is a code unit above
+#: U+0100 -- `'Ge'` in `GetProcAddress` is U+6547, a perfectly good CJK
+#: ideograph -- so machine code reads as CJK too, and a narrow constant reads
+#: as a wide one that then covers it.  Measured on ImageWriterSvc: 373 wide
+#: runs accepted against the 181 this rule accepts, the extras every one of
+#: them code, and eight narrow literals lost underneath them.  Requiring the
+#: zero high byte is also the only corroboration this shape has: a run of
+#: bytes where every second one is zero is not machine code, which is the
+#: doubt the narrow scan needs the ASCII restriction and the reference gate
+#: to settle.  The price is a constant in a non-Latin script, not recovered.
+_UNIT_TEXT, _UNIT_NUL = 1, 2
+_LOW_BYTE_UNITS = bytes(
+    _UNIT_NUL if c == 0 else
+    _UNIT_TEXT if is_headerless_text_byte(c) else 0
+    for c in range(256))
+#: 1 where the high byte permits a unit at all, 0 where it rules one out.
+_HIGH_BYTE_UNITS = bytes(1 if c == 0 else 0 for c in range(256))
+
+
+class CharArrayLiteral(object):
+    """A string constant the compiler emitted with no header in front of it.
+
+    Delphi does not give every constant an AnsiString record.  A `PChar` or an
+    `array[0..n] of AnsiChar` -- the `LoadLibrary`/`GetProcAddress` idiom's
+    `'kernel32.dll'` and `'GetLongPathNameA'`, window class names, registry
+    paths, clipboard format names, `'DVCLAL'` -- is emitted as nothing but its
+    characters and a NUL, dword aligned, in the code stream between two
+    functions.  There is no refcount, no length and no code page, because
+    nothing at runtime ever asks: the code holds the address of the first
+    character and the RTL walks to the terminator.
+
+    So the span of one of these is body plus terminator and nothing else, and
+    `addr` is both the first character and the address the code references --
+    unlike `StringLiteral`, where `addr` is a header the body sits past.
+    Modelling it as a header record with zeroed fields would be a claim about
+    bytes that belong to whatever precedes it.
+    """
+
+    __slots__ = ("addr", "length", "raw", "elem_size")
+
+    def __init__(self, addr, length, raw, elem_size=1):
+        self.addr = addr                  # the first character
+        self.length = length              # characters, not bytes
+        self.raw = raw                    # characters, without the terminator
+        self.elem_size = elem_size
+
+    @property
+    def body(self):
+        """The first character -- which is the record, there being no header.
+
+        Named to match `StringLiteral.body` so a caller that only wants the
+        address the code references does not have to know which it holds.
+        """
+        return self.addr
+
+    @property
+    def end(self):
+        """One past the terminator."""
+        return self.addr + (self.length + 1) * self.elem_size
+
+    @property
+    def text(self):
+        if self.elem_size == 2:
+            return self.raw.decode("utf-16-le")
+        return self.raw.decode("latin-1")
+
+    @property
+    def kind(self):
+        """The Delphi type of this constant.
+
+        `PChar` and `array[0..n] of AnsiChar` compile to identical bytes and
+        nothing in the image distinguishes them, so the pointer type names
+        both: it is the one thing the reference at the use site proves.
+        """
+        return "PWideChar" if self.elem_size == 2 else "PChar"
+
+    def __repr__(self):
+        return "<%s %08x %r>" % (self.kind, self.addr, self.text[:32])
+
+
+def _wide_units(data):
+    """Classify `data` as UTF-16LE code units, one class byte per unit.
+
+    `data` must start on an even address for the split to line up with the
+    units.  A unit counts as text when its high byte is zero and its low byte
+    is text on its own; see `_HIGH_BYTE_UNITS` for why nothing above U+00FF
+    is accepted.  Slicing the two byte planes and translating each is what
+    makes the classification a C-level pass rather than a Python loop over
+    every second byte of the section.
+    """
+    low = data[0::2].translate(_LOW_BYTE_UNITS)
+    high = data[1::2].translate(_HIGH_BYTE_UNITS)
+    return bytes(l if h else 0 for l, h in zip(low, high))
+
+
+#: What an unreadable byte is filled with.  Both scans want one whole buffer
+#: per range -- a run has to be maximal, which it cannot be if a chunk
+#: boundary can end it -- and a section's virtual size routinely exceeds the
+#: bytes actually in the file.  0xFF is the fill because it is text under
+#: neither rule: not ASCII, so neither a narrow body byte nor the low byte of
+#: a code unit, and never the zero high byte a unit needs.  So a gap stops a
+#: run instead of joining two, and no run is invented out of bytes that are
+#: not there.
+_UNREADABLE = 0xFF
+
+
+def _range_bytes(r, start, end):
+    """The bytes of [start, end), with anything unreadable filled opaque."""
+    data = bytearray()
+    for base in range(start, end, _CHUNK):
+        want = min(_CHUNK, end - base)
+        chunk = r.bytes(base, want)
+        data += chunk
+        if len(chunk) < want:
+            data += bytes([_UNREADABLE]) * (want - len(chunk))
+    return bytes(data)
+
+
+def _runs(classified, min_chars, text, nul):
+    """Yield (element index, element count) for every maximal run of `text`
+    at least `min_chars` long that ends at a `nul`.
+
+    Maximality is what the regex gives for free and what the rule needs: a
+    match can only begin where the run does, because a match attempt one
+    element earlier would have succeeded and consumed this one.  Starting
+    mid-run would declare a literal's tail as a literal of its own.
+    """
+    pattern = re.compile(b"[%s]{%d,}%s" % (text, min_chars, nul))
+    for m in pattern.finditer(classified):
+        yield m.start(), m.end() - m.start() - 1
+
+
+def headerless_candidates(r, start, end, wide=False,
+                          min_chars=MIN_HEADERLESS_CHARS, align=4):
+    """Every run in [start, end) shaped like a header-less constant.
+
+    Shape only: an aligned, maximal, NUL-terminated run of text long enough to
+    be worth believing.  Shape alone is nowhere near enough to declare one --
+    `push`, `pop` and the register-to-register forms of `mov` all encode as
+    ASCII -- which is why this is only half of `scan_headerless_strings`, and
+    why nothing else should call it without the reference gate.
+
+    The compiler aligns these to a dword even in the wide case, where a
+    two-byte element would allow otherwise, because what follows them in the
+    code stream is a function entry.  Requiring it costs nothing measurable
+    -- relaxing the test to the element size adds no candidate at all in
+    Demo.exe, ImageWriterSvc or DX.HttpDiag -- and it is kept because a run
+    starting mid-instruction is the case the reference gate cannot rule out
+    on its own, an immediate operand being free to point anywhere.
+    """
+    data = _range_bytes(r, start, end)
+    elem = 2 if wide else 1
+    if wide:
+        # The unit stream has to start where the units do. A section start is
+        # page aligned in every PE, so this never actually skips anything;
+        # it is here so a caller passing an odd range cannot silently shift
+        # every unit by a byte.
+        skew = start % 2
+        base, classified = start + skew, _wide_units(data[skew:])
+        text, nul = b"\\x%02x" % _UNIT_TEXT, b"\\x%02x" % _UNIT_NUL
+    else:
+        base, classified = start, data
+        text, nul = _TEXT_CLASS, b"\\x00"
+    valid = is_wide_string_text if wide else is_headerless_text
+    for index, length in _runs(classified, min_chars, text, nul):
+        addr = base + index * elem
+        if addr % align:
+            continue
+        raw = bytes(data[addr - start:addr - start + length * elem])
+        # The wide classification accepts a lone surrogate, which decodes as
+        # nothing; the narrow class cannot fail here, and is checked anyway so
+        # that the two paths answer to the same predicate.
+        if not valid(raw):
+            continue
+        yield CharArrayLiteral(addr, length, raw, elem)
+
+
+def pointer_targets(r, ranges, targets):
+    """Which of `targets` some dword in `ranges` holds.
+
+    x86 takes the address of a constant as an immediate -- `mov ebx, offset`,
+    `push offset` -- and the assembler puts that dword wherever the opcode
+    leaves it, so unlike every other structure here it is not aligned to
+    anything.  All four phases have to be walked, which is why this is done
+    once for the whole candidate set rather than per candidate: each phase is
+    one C-level intersection of the candidate set against a machine array,
+    where a per-candidate search would be a pass over the section apiece.
+    """
+    want = set(targets)
+    found = set()
+    if not want:
+        return found
+    for start, end in ranges:
+        data = _range_bytes(r, start, end)
+        view = memoryview(data)
+        for phase in range(4):
+            count = (len(data) - phase) // 4
+            if count <= 0:
+                continue
+            found |= want.intersection(
+                view[phase:phase + 4 * count].cast("I"))
+    return found
+
+
+def _outside(spans):
+    """A predicate answering whether [lo, hi) misses every span in `spans`.
+
+    The spans are coalesced first, so the answer is one binary search: the
+    only span that can overlap a query is the last one starting at or before
+    `lo`, or the first one starting after it.  Touching spans may be merged
+    because every query here is a whole literal and so has a length; the
+    zero-length seam that makes merging wrong for `undefine_functions` cannot
+    arise.
+    """
+    merged = cluster(spans, gap=0)
+    starts = [s for s, _ in merged]
+
+    def outside(lo, hi):
+        i = bisect.bisect_right(starts, lo)
+        if i and merged[i - 1][1] > lo:
+            return False
+        return not (i < len(merged) and merged[i][0] < hi)
+
+    return outside
+
+
+def scan_headerless_strings(r, ranges, claimed=(), ref_ranges=None, wide=None,
+                            min_chars=MIN_HEADERLESS_CHARS):
+    """Every header-less string constant in `ranges`, in ascending order.
+
+    Three tests, and each one is load-bearing:
+
+    * the run is dword aligned, maximal, NUL terminated and at least
+      `min_chars` long -- `headerless_candidates`;
+    * it lies outside `claimed`, the spans the header-validated string scan
+      and the RTTI scan already account for.  Without this the run would
+      re-declare the body of a record that is better described by the record,
+      and would swallow the length byte of an extended-RTTI ShortString into a
+      span that starts one byte late;
+    * and the first character is the target of a pointer somewhere in the
+      image.  This is the test that separates a constant from machine code
+      that happens to read as ASCII: a constant nothing references is a
+      constant nothing proves is there, and an unreferenced run of code bytes
+      is exactly what the other two tests cannot tell apart from one.
+
+    `wide` says whether to look for UTF-16 constants as well, and defaults to
+    what the reader's layout says about the compiler version, since before
+    Delphi 2009 there are none to find.  `ref_ranges` says where a reference
+    may come from and defaults to `ranges`; a caller that can see the whole
+    image should pass it, because a constant reached through an initialised
+    pointer in .data is referenced from outside the code and by nothing else.
+    """
+    if wide is None:
+        wide = r.layout.wide_strings
+    candidates = []
+    outside = _outside(claimed)
+    for start, end in ranges:
+        for is_wide in ((False, True) if wide else (False,)):
+            for lit in headerless_candidates(r, start, end, is_wide,
+                                             min_chars):
+                if outside(lit.addr, lit.end):
+                    candidates.append(lit)
+    referenced = pointer_targets(
+        r, ranges if ref_ranges is None else ref_ranges,
+        [lit.addr for lit in candidates])
+    accepted, reach = [], None
+    for lit in sorted(candidates, key=lambda c: (c.addr, -c.length)):
+        # Runs of one width never overlap -- the regex consumes each one --
+        # but the section is walked once per width, and two declarations over
+        # one span would be two data variables fighting over the same bytes.
+        # Requiring the zero high byte means no run can currently be read
+        # both ways; this keeps that an invariant of the result rather than a
+        # property of the two character classes that has to stay true.
+        if lit.addr in referenced and (reach is None or lit.addr >= reach):
+            accepted.append(lit)
+            reach = lit.end
+    return accepted
 
 
 # ------------------------------------------------- property accessor decoding

@@ -123,6 +123,7 @@ class DelphiMetadata(object):
         self.vmts = {}
         self.typeinfos = {}
         self.strings = {}
+        self.char_arrays = {}
         self._children = None
         self._interfaces = None
         self._uregions = None
@@ -155,7 +156,31 @@ class DelphiMetadata(object):
             self._uregions = None
             self._uevidence = None
             self._class_ti = None
+        self._scan_char_arrays(ranges)
         return self
+
+    def _scan_char_arrays(self, ranges):
+        """Recover the constants that carry no header, after everything that
+        does.
+
+        Order is the whole point: a header-less run is accepted only where no
+        record already accounts for the bytes, so every VMT, TTypeInfo and
+        header-validated literal has to be known first.  That also means this
+        cannot run per range like the rest of the scan -- a record found in
+        one section still rules a run in another out.
+
+        References are looked for across the whole image rather than the code
+        sections alone.  A PChar constant reached through an initialised
+        pointer in .data is referenced by exactly one dword and that dword is
+        not in the code, and on the corpus restricting the search to
+        executable ranges lost 47 of 75 in ImageWriterSvc and 55 of 83 in
+        DX.HttpDiag -- all of them genuine.
+        """
+        claimed = [(s, e) for s, e, _ in self.spans()]
+        image = [(s.start, s.end) for s in self.bv.sections.values()]
+        for literal in P.scan_headerless_strings(
+                self.reader, ranges, claimed, ref_ranges=image or ranges):
+            self.char_arrays[literal.addr] = literal
 
     # -- derived views ----------------------------------------------------
 
@@ -177,6 +202,8 @@ class DelphiMetadata(object):
                 out.append((s, e, "%s %s" % (label, v.name)))
         if strings:
             for literal in self.strings.values():
+                out.append((literal.addr, literal.end, literal.kind))
+            for literal in self.char_arrays.values():
                 out.append((literal.addr, literal.end, literal.kind))
         return sorted(out)
 
@@ -659,6 +686,22 @@ class TypeFactory(object):
         return Type.named_type_reference(
             NamedTypeReferenceClass.StructNamedTypeClass, name, width=width)
 
+    def char_array_type(self, literal):
+        """A header-less constant: the characters and the terminator, and
+        nothing else.
+
+        No struct and no named type, unlike `string_literal_type`, because
+        there is no record here to name.  A `PChar` constant is exactly
+        `array[0..n] of AnsiChar` in the image -- no refcount, no length, no
+        code page -- so a char array of n+1 elements describes every byte the
+        compiler reserved and asserts nothing about the bytes in front of it,
+        which belong to whatever the compiler emitted before.  Wrapping it in
+        a `TPCharLiteral_N` struct with the header fields left out would only
+        put a name on an array.
+        """
+        char = Type.wide_char(2) if literal.elem_size == 2 else Type.char()
+        return Type.array(char, literal.length + 1)
+
     INTF_ENTRY_SIZE = 28
 
     def _interface_entry_type(self):
@@ -860,6 +903,7 @@ class Applier(object):
                       "functions_created": 0, "data_vars": 0,
                       "comments": 0, "enums": 0, "structs": 0,
                       "self_typed": 0, "name_conflicts": 0, "strings": 0,
+                      "char_arrays": 0,
                       "dfm_streams": 0, "dfm_events_bound": 0,
                       "dfm_events_unbound": 0}
         self.log_lines = []
@@ -873,9 +917,9 @@ class Applier(object):
     def run(self):
         md = self.md
         self.log("%d VMTs, %d TypeInfo records, %d string constants, "
-                 "%d metadata regions"
+                 "%d header-less constants, %d metadata regions"
                  % (len(md.vmts), len(md.typeinfos), len(md.strings),
-                    len(md.regions())))
+                    len(md.char_arrays), len(md.regions())))
 
         if self.opt["undefine"]:
             # Exact record spans, never the coalesced regions: the filler
@@ -912,6 +956,8 @@ class Applier(object):
             # the rare address both claim, the record's declaration wins.
             for literal in md.strings.values():
                 self._apply_string(literal)
+            for literal in md.char_arrays.values():
+                self._apply_char_array(literal)
             for ti in md.typeinfos.values():
                 self._apply_typeinfo(ti)
             for vmt in md.vmts.values():
@@ -982,6 +1028,13 @@ class Applier(object):
         self._data(literal.addr, self.factory.string_literal_type(literal),
                    string_var_name(literal))
         self.stats["strings"] += self.stats["data_vars"] - before
+
+    def _apply_char_array(self, literal):
+        """Declare one header-less constant as the char array it is."""
+        before = self.stats["data_vars"]
+        self._data(literal.addr, self.factory.char_array_type(literal),
+                   string_var_name(literal))
+        self.stats["char_arrays"] += self.stats["data_vars"] - before
 
     def _apply_typeinfo(self, ti):
         base = self.md.qualified(ti)
