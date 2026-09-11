@@ -4,9 +4,9 @@
 Every other module in `tools/` builds a library from an outside source -- an
 IDR knowledge base, an object file, a binary's own metadata, a runtime
 package.  This one builds no signatures at all.  Its input is the seventeen
-`delphi-rtl-*.warp` files already in `signatures/`, and its output is the same
-signatures rearranged so that no two libraries loaded together claim the same
-function GUID.
+per-release `delphi-rtl-*.warp` files the others produce, and its output is the
+same signatures rearranged so that no two libraries loaded together claim the
+same function GUID under different names.
 
 ## Why rearranging is worth a tool
 
@@ -64,11 +64,19 @@ The two are disjoint by construction, and the deltas are disjoint from each
 other, so an era's containers cannot produce a duplicate claim between them.
 Eras `2` and `3` hold one library each and get a delta with no core.
 
-One GUID, one library -- but not always one entry.  A folded GUID that
-`FOLDED_POLICY` keeps contributes one entry per routine in the fold, all to
-the same library, so the matcher chooses between them from its constraints the
-way it does today.  That is a choice inside one container rather than across
-several, which is the part that was nondeterministic.
+One GUID, one library -- but not one entry.  Two things put several entries on
+one GUID, and both are deliberate:
+
+* a folded GUID that `FOLDED_POLICY` keeps contributes one entry per routine in
+  the fold, so the matcher chooses between them from its constraints the way it
+  does today -- inside one container rather than across several, which is the
+  part that was nondeterministic;
+* a name several of the era's libraries agree on is kept **once per library**,
+  because an entry carries the constraints of the release it was built from and
+  those are what the matcher tests.  See `plan` for what keeping only one costs.
+
+Neither puts two *names* on one GUID across two files, which is the thing that
+races.
 
 ## Which name a shared GUID keeps
 
@@ -107,17 +115,22 @@ One further drop, in the same spirit as the disagreement rule:
 
 ## Usage
 
-    BN_USER_DIRECTORY=... bnpython3 tools/coalesce.py <outdir>
+    mkdir per-release && for t in 2 3 4 5 6 7 2005 2006 2007 2009 2010 \
+        2011 2012 2013 2014 xe2plus 10.4; do
+      git show <commit>:signatures/delphi-rtl-$t.warp > per-release/delphi-rtl-$t.warp
+    done
+    BN_USER_DIRECTORY=... bnpython3 tools/coalesce.py <outdir> per-release
     BN_USER_DIRECTORY=... bnpython3 tools/coalesce.py <outdir> --compress
     BN_USER_DIRECTORY=... bnpython3 tools/coalesce.py <outdir> --verify
 
-The first pass selects and stages the libraries into `<outdir>/raw`, and
-writes a `plan.tsv` recording every decision; the second rewrites them
-compressed into `<outdir>` itself.  They are separate runs because the second
-must not share a process with the containers the first registers.  `--verify`
-reads the result back and checks it against `plan.tsv`.  Nothing in
-`signatures/` is read for anything but its contents, and nothing there is
-written.
+The per-release libraries are the input, and `signatures/` no longer holds
+them -- this tool superseded them and they were deleted -- so a rebuild starts
+by getting them back out of git.  The first pass selects and stages into
+`<outdir>/raw` and writes a `plan.tsv` recording every decision; the second
+rewrites them compressed into `<outdir>` itself.  They are separate runs
+because the second must not share a process with the containers the first
+registers.  `--verify` reads the result back and checks it against `plan.tsv`.
+Nothing is written outside `<outdir>`.
 """
 
 import collections
@@ -246,18 +259,63 @@ def routines(here):
     return groups
 
 
-def plan(claims, folded_policy=None):
+def spellings_of(group, keep_all):
+    """`[(name, [library, ...]), ...]` for one routine's claims in one era.
+
+    The libraries that claim one routine do not always spell it the same way,
+    and only one spelling can survive without putting two names on one GUID.
+    `keep_all` is the experiment that says otherwise: keep every spelling, each
+    with the libraries that used it, so that no library's constraints are lost
+    to a spelling it did not win.  It is off because it costs more than it
+    buys -- see COALESCE.md.
+    """
+    if not keep_all:
+        name = vote(group)
+        return [(name, sorted((t for t, m in group.items() if m == name),
+                              key=AGE.index))]
+    by_spelling = collections.defaultdict(list)
+    for tag, name in group.items():
+        by_spelling[name].append(tag)
+    return [(n, sorted(ts, key=AGE.index))
+            for n, ts in sorted(by_spelling.items())]
+
+
+def plan(claims, folded_policy=None, keep_all_spellings=False):
     """Decide, per era, what every GUID becomes.
 
     `claims` is `{guid: {tag: {name, ...}}}` -- a name *set* per library,
     because a shipped library can hold several entries for one GUID.
 
     Returns `(assignments, stats)`.  An assignment is
-    `(era, guid, destination_tag, name)`; `destination_tag` is `"core-<era>"`
-    for a GUID more than one library claims and `"<tag>-only"` for one only
-    `tag` claims.  A GUID that appears in several eras gets an assignment in
-    each, independently: the eras never load together, so they are allowed to
-    disagree, and each keeps the spelling its own libraries voted for.
+    `(era, guid, destination_tag, name, sources)`; `destination_tag` is
+    `"core-<era>"` for a GUID more than one library claims and `"<tag>-only"`
+    for one only `tag` claims, and `sources` is every library of the era that
+    claims that GUID under exactly that name.  A GUID that appears in several
+    eras gets an assignment in each, independently: the eras never load
+    together, so they are allowed to disagree, and each keeps the spelling its
+    own libraries voted for.
+
+    `sources` is a list rather than the single library the spelling vote
+    happened to come from because **an entry carries the constraints of the
+    release it was built from** -- the GUIDs of the functions that body calls.
+    Those are what the matcher tests when it has to choose, and they are
+    release-specific even where the body is not.  Measured on a Delphi 5
+    binary, splitting the matches it used to make by which library the one
+    surviving entry had been copied from:
+
+        copied from delphi-rtl-5      64 / 67 still match   96%
+        copied from delphi-rtl-7      11 / 26               42%
+        copied from delphi-rtl-2007  155 / 297              52%
+
+    So keeping one entry per GUID silently narrows the library to whichever
+    release the spelling vote favoured, and costs roughly half the matches on
+    every other release in the era.  Keeping one entry per *library* costs
+    space and nothing else: every one of them carries the same GUID and the
+    same name, and a duplicate claim under an identical name is the case the
+    matcher handles without ambiguity.  Libraries that spell the name
+    differently are still dropped -- their entry cannot be kept without
+    putting two spellings of one routine in one file, which is the race this
+    whole tool exists to remove.
 
     A folded GUID gets one assignment per routine in the fold, all to the same
     destination -- see `FOLDED_POLICY` for when that happens instead of a drop.
@@ -287,8 +345,10 @@ def plan(claims, folded_policy=None):
                         else "%s-only" % next(iter(here)))
                 counts["kept folded"] += 1
                 for group in routines(here).values():
-                    counts["kept folded entries"] += 1
-                    assignments.append((era, guid, dest, vote(group)))
+                    for name, sources in spellings_of(group, keep_all_spellings):
+                        counts["kept folded entries"] += 1
+                        counts["entries"] += len(sources)
+                        assignments.append((era, guid, dest, name, sources))
                 continue
             single = {t: next(iter(n)) for t, n in here.items()}
             if len(single) == 1:
@@ -297,9 +357,10 @@ def plan(claims, folded_policy=None):
                 # GUID cannot be ambiguous with anything, so there is nothing
                 # to gain by dropping the only name on offer.
                 counts["unique"] += 1
+                counts["entries"] += 1
                 if PLACEHOLDER.search(name):
                     counts["unique placeholder"] += 1
-                assignments.append((era, guid, "%s-only" % tag, name))
+                assignments.append((era, guid, "%s-only" % tag, name, [tag]))
                 continue
             winner = vote(single)
             if winner is None:
@@ -308,7 +369,9 @@ def plan(claims, folded_policy=None):
             counts["shared"] += 1
             if len(set(single.values())) > 1:
                 counts["shared renamed"] += 1
-            assignments.append((era, guid, "core-%s" % era, winner))
+            for name, sources in spellings_of(single, keep_all_spellings):
+                counts["entries"] += len(sources)
+                assignments.append((era, guid, "core-%s" % era, name, sources))
     return assignments, stats
 
 
@@ -327,15 +390,35 @@ def read_claims(paths, log=print):
     return claims
 
 
-def build(sigdir, outdir, log=print):
-    """Read `sigdir`, decide, and write the coalesced libraries to `outdir`."""
+def build(sigdir, outdir, keep_all_spellings=False, every_source=False,
+          log=print):
+    """Read `sigdir`, decide, and write the coalesced libraries to `outdir`.
+
+    `every_source` keeps one entry per library that agreed on a name, instead
+    of one entry per name.  It sounds like the right thing -- an entry carries
+    the constraints of the release it was built from, so keeping only one
+    narrows the library to whichever release the spelling vote favoured -- and
+    it is off, because it was built and measured and it loses:
+
+        Demo.exe (D5)          3926-3929 -> 3926-3928, varying names 3 -> 7
+        ImageWriterSvc (D12)        3359 -> 3347
+        DX.HttpDiag (D13)           1846 -> 1834
+
+    The reason is in the compression pass.  Entries that share a GUID and a
+    name are merged into one whose constraint list is the *union* of theirs --
+    five staged entries for `System::@Finalize` carrying nine constraints each
+    came back as one carrying eleven -- and a longer constraint list is
+    strictly harder to satisfy.  So the extra entries do not survive as
+    alternatives the matcher can choose between; they survive as one stricter
+    entry.  See COALESCE.md.
+    """
     import binaryninja as bn
     from binaryninja import warp
 
     paths = sorted(os.path.join(sigdir, f) for f in os.listdir(sigdir)
                    if f.startswith("delphi-rtl-") and f.endswith(".warp"))
     claims = read_claims(paths, log)
-    assignments, stats = plan(claims)
+    assignments, stats = plan(claims, keep_all_spellings=keep_all_spellings)
     del claims
 
     for era in ERAS:
@@ -348,26 +431,37 @@ def build(sigdir, outdir, log=print):
                counts["kept folded"], counts["kept folded entries"],
                FOLDED_POLICY.get(era, "drop"),
                counts["dropped folded"], counts["dropped disagreement"]))
+        names = (counts["shared"] + counts["unique"]
+                 + counts["kept folded entries"])
+        log("        %d names on %d GUIDs, claimed by %d library entries"
+            % (names, counts["shared"] + counts["unique"] + counts["folded"]
+               - counts["dropped folded"], counts["entries"]))
 
-    # (era, guid) -> (destination, {name, ...}).  Keyed on the era as well,
-    # because a GUID in both era 8 and era 11 is written to both, under
-    # whatever spelling each era voted for.  The value is a name *set* because
-    # a kept fold contributes one entry per routine in it.
+    # (era, guid) -> (destination, {name: {library, ...}}).  Keyed on the era
+    # as well, because a GUID in both era 8 and era 11 is written to both,
+    # under whatever spelling each era voted for.  The value maps each name to
+    # the libraries whose entry for it is wanted: a kept fold contributes one
+    # name per routine in it, and each name contributes one entry per library
+    # that agrees on it.
     wanted = {}
-    for era, guid, dest, name in assignments:
-        wanted.setdefault((era, guid), (dest, set()))[1].add(name)
+    for era, guid, dest, name, sources in assignments:
+        names = wanted.setdefault((era, guid), (dest, {}))[1]
+        names.setdefault(name, set()).update(sources)
     if not os.path.isdir(outdir):
         os.makedirs(outdir)
     with open(os.path.join(outdir, "plan.tsv"), "w") as fh:
-        for era, guid, dest, name in sorted(assignments):
-            fh.write("%s\t%s\t%s\t%s\n" % (era, guid, dest, name))
+        for era, guid, dest, name, sources in sorted(assignments):
+            fh.write("%s\t%s\t%s\t%s\t%s\n"
+                     % (era, guid, dest, name, ",".join(sources)))
 
     # One pass per library, keeping only the WarpFunction objects some
-    # destination wants.  A function is picked up by the era it belongs to *and*
-    # by a name that era chose: the library holding the winning spelling is
-    # the one whose entry is copied, and a typed entry beats an untyped one so
-    # the coalesced library keeps as many prototypes as the originals had.
-    chosen = {}               # destination -> {(guid, name): (score, function)}
+    # destination wants.  A function is picked up by the era it belongs to, by
+    # a name that era chose, and by being one of the libraries that agreed on
+    # that name -- so every agreeing release contributes its own entry, with
+    # its own constraints and its own prototype.  Within one library a GUID and
+    # name can still appear twice; the typed copy wins, so the coalesced
+    # library keeps as many prototypes as the originals had.
+    chosen = {}     # destination -> {(guid, name[, tag]): (score, function)}
     for path in paths:
         tag = os.path.basename(path)[len("delphi-rtl-"):-len(".warp")]
         eras = [e for e, t in ERAS.items() if tag in t]
@@ -377,12 +471,16 @@ def build(sigdir, outdir, log=print):
                 guid = str(function.guid)
                 for era in eras:
                     entry = wanted.get((era, guid))
-                    if entry is None or function.name not in entry[1]:
+                    if entry is None or tag not in entry[1].get(
+                            function.name, ()):
                         continue
                     dest = chosen.setdefault(entry[0], {})
-                    key = (guid, function.name)
-                    score = (1 if function.type is not None else 0,
-                             AGE.index(tag))
+                    key = ((guid, function.name, tag) if every_source
+                           else (guid, function.name))
+                    score = ((1 if function.type is not None else 0,)
+                             if every_source else
+                             (1 if function.type is not None else 0,
+                              AGE.index(tag)))
                     if key not in dest or dest[key][0] < score:
                         dest[key] = (score, function)
                         taken += 1
@@ -471,35 +569,45 @@ def verify(outdir, log=print):
     destination could keep the wrong spelling, and -- the one that would put
     the nondeterminism straight back -- two libraries of one era could still
     claim the same GUID.
+
+    What is enforced is the set of *names* on each GUID, not the number of
+    entries.  The compression pass merges entries that share a GUID and a name,
+    unioning their constraints rather than dropping them -- measured on
+    `System::@Finalize`, five staged entries carrying nine constraints each
+    came back as one carrying eleven -- so a file built with `--every-source`
+    legitimately holds fewer entries than the plan asked for.
     """
     from binaryninja import warp
-    # destination -> {guid: {name, ...}}; a kept fold is several names on one
-    # GUID, which is the one case where more than one entry is intended.
-    expected = collections.defaultdict(lambda: collections.defaultdict(set))
+    # destination -> {guid: {name: how many entries}}.  Two reasons a GUID
+    # carries more than one entry: a kept fold is several routines under
+    # several names, and a name several libraries agreed on is kept once per
+    # library, so the count matters as much as the set.
+    expected = collections.defaultdict(
+        lambda: collections.defaultdict(collections.Counter))
     for line in open(os.path.join(outdir, "plan.tsv")):
-        era, guid, dest, name = line.rstrip("\n").split("\t")
-        expected[dest][guid].add(name)
+        era, guid, dest, name, sources = line.rstrip("\n").split("\t")
+        expected[dest][guid][name] += len(sources.split(","))
     actual = {}
     for f in sorted(os.listdir(outdir)):
         if not (f.startswith("delphi-rtl-") and f.endswith(".warp")):
             continue
         dest = f[len("delphi-rtl-"):-len(".warp")]
-        got = collections.defaultdict(set)
+        got = collections.defaultdict(collections.Counter)
         for chunk in warp.WarpFile(os.path.join(outdir, f)).chunks:
             for function in chunk.functions:
-                got[str(function.guid)].add(function.name)
+                got[str(function.guid)][function.name] += 1
         actual[dest] = got
     bad = 0
     for dest, want in sorted(expected.items()):
         got = actual.get(dest, {})
         missing = set(want) - set(got)
         extra = set(got) - set(want)
-        wrong = [g for g in set(want) & set(got) if got[g] != want[g]]
+        wrong = [g for g in set(want) & set(got) if set(got[g]) != set(want[g])]
         bad += len(missing) + len(extra) + len(wrong)
-        log("%-24s %7d GUIDs / %7d entries wanted, %7d / %7d present, "
+        log("%-24s %7d GUIDs / %7d names wanted, %7d / %7d entries present, "
             "%d missing, %d extra, %d misnamed"
             % (dest, len(want), sum(len(n) for n in want.values()),
-               len(got), sum(len(n) for n in got.values()),
+               len(got), sum(sum(n.values()) for n in got.values()),
                len(missing), len(extra), len(wrong)))
     for era, tags in ERAS.items():
         dests = [d for d in actual
@@ -520,13 +628,22 @@ def verify(outdir, log=print):
 
 def main(argv):
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    outdir = argv[1] if len(argv) > 1 else os.path.join(root, "signatures-new")
+    args = [a for a in argv[1:] if not a.startswith("--")]
+    outdir = args[0] if args else os.path.join(root, "signatures-new")
     if "--verify" in argv:
         sys.exit(1 if verify(outdir) else 0)
     elif "--compress" in argv:
         compress_all(outdir)
     else:
-        build(os.path.join(root, "signatures"), outdir)
+        # The per-release libraries are this tool's input and are no longer in
+        # `signatures/`: coalescing superseded them and they were deleted.
+        # `git show <commit>:signatures/delphi-rtl-<tag>.warp` still has every
+        # one of them, and the second argument points the build at wherever
+        # they were extracted to.
+        source = args[1] if len(args) > 1 else os.path.join(root, "signatures")
+        build(source, outdir,
+              keep_all_spellings="--all-spellings" in argv,
+              every_source="--every-source" in argv)
 
 
 if __name__ == "__main__":

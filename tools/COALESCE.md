@@ -308,12 +308,64 @@ entry matches half the time. The tie-break that picks the copy source prefers
 the newest library, which is right for the spelling and wrong for the
 constraints.
 
-Fixing that means keeping one entry per library wherever the libraries agree on
-the name — same GUID, same name, different constraints, which by the rule above
-is a harmless duplicate rather than an ambiguity. It is sized and not taken
-here: it would raise the output from 264,120 entries to 422,584, giving back
-most of the size win, and it changes every era rather than just the ones whose
-folds are kept.
+Fixing that looks straightforward: keep one entry per library wherever the
+libraries agree on the name — same GUID, same name, different constraints,
+which by the rule at the top of this file is a harmless duplicate rather than
+an ambiguity. That was built (`--every-source`) and measured, and **it does not
+work**:
+
+| binary | one entry per name | one entry per agreeing library |
+| --- | --- | --- |
+| `Demo.exe` (D5) | 3926–3929, 3 names varying | 3926–3928, **7 varying**, 5 of 5 sets distinct |
+| `Launcher.exe` (D7) | 3108–3109, 2 varying | 3114–3115, 2 varying |
+| `Compil32.exe` (D3.02) | 1741–1742, 2 sets | 1741–1742, **3 sets** |
+| `ImageWriterSvc.exe` (D12) | 3359 ×5 | **3347** ×5 |
+| `DX.HttpDiag-Win32.exe` (D13) | 1846 ×5 | **1834** ×5 |
+
+Six matches gained on one binary, twelve lost on each of two others, and the
+run-to-run variation on `Demo.exe` more than doubled. 264,120 entries became
+422,584 in the plan and 79,252,852 bytes on disk against 76,813,952.
+
+Two reasons it fails, both worth recording because they are not obvious.
+
+**The extra entries do not survive as alternatives.** The compression pass
+merges entries that share a GUID and a name into one whose constraint list is
+the union of theirs — five staged entries for `System::@Finalize`, each
+carrying nine constraints, came back as one carrying eleven. A longer
+constraint list is strictly harder to satisfy, so the merge produces one
+*stricter* entry rather than several the matcher can choose between. That is
+why the eleven-slot era, which this was not supposed to touch at all, lost
+twelve matches on both of its binaries.
+
+**The constraints that would have helped belong to a spelling that lost.**
+Taking the 254 addresses `Demo.exe` stopped matching whose name is still
+somewhere in the libraries, and asking whether the Delphi 5 library is among
+those that agreed on the surviving spelling:
+
+| | |
+| --- | ---: |
+| Delphi 5's spelling won, so its entry is kept | 6 |
+| **Delphi 5's entry is dropped because it spells the unit differently** | **187** |
+| dropped earlier as a genuine name disagreement | 61 |
+
+`delphi-rtl-5` writes `system::@Finalize` where `6`, `7`, `2005`, `2006` and
+`2007` write `System::@Finalize`, so the vote goes against it and its entry —
+the only one built from the release this binary actually used — is the one
+that cannot be kept. Where the libraries *do* agree on the spelling their
+entries turn out to be identical anyway, which is why keeping all of them buys
+nothing.
+
+Recovering those 187 would mean keeping `system::@Finalize` and
+`System::@Finalize` as two entries on one GUID in one file. That is
+`--all-spellings`, and it is neither built nor shipped: it would put a second
+spelling on 19,308 more GUIDs — 27,025 with more than one name against 7,717
+today — and those 19,308 are precisely the addresses whose names raced between
+runs in the per-release set. Merging constraints alone already took `Demo.exe`
+from three varying names to seven; this would be the same bargain on twenty
+times the surface.
+
+So the recall loss on the older eras stands, and its largest remaining cause is
+recorded rather than fixed.
 
 ### What is still duplicated
 
@@ -344,11 +396,26 @@ libraries that were just separated.
 
 ## Usage
 
-    BN_USER_DIRECTORY=... bnpython3 tools/coalesce.py <outdir>
+The per-release libraries are this tool's input, and `signatures/` no longer
+holds them: coalescing superseded them and they were deleted. A rebuild starts
+by getting them back out of git.
+
+    mkdir per-release
+    for t in 2 3 4 5 6 7 2005 2006 2007 2009 2010 2011 2012 2013 2014 \
+             xe2plus 10.4; do
+      git show f422a1f:signatures/delphi-rtl-$t.warp \
+        > per-release/delphi-rtl-$t.warp
+    done
+    BN_USER_DIRECTORY=... bnpython3 tools/coalesce.py <outdir> per-release
     BN_USER_DIRECTORY=... bnpython3 tools/coalesce.py <outdir> --compress
     BN_USER_DIRECTORY=... bnpython3 tools/coalesce.py <outdir> --verify
 
 The passes are separate processes on purpose: the first leaves nineteen
 containers registered, and the second must not share a process with them.
-`plan.tsv` in `<outdir>` records every decision — era, GUID, destination,
-name — so a disputed name can be traced back without rerunning anything.
+`plan.tsv` in `<outdir>` records every decision — era, GUID, destination, name
+and the libraries that agreed on it — so a disputed name can be traced back
+without rerunning anything.
+
+`--every-source` and `--all-spellings` are the two variants measured above and
+rejected; they are kept so the measurement can be repeated rather than taken on
+trust.
