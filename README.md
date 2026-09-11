@@ -41,9 +41,6 @@ field names come from the binary's own published method and field tables.
 `sub_48ac90` calls and six raw offsets become the tab names the code is
 actually toggling.
 
-Across that binary: **2,491 to 8,299 named functions**, 6 to 4,507 signature
-matches, and 1,226 comments recovered.
-
 ## Layout
 
     rtti/          the decoder and everything that applies what it finds
@@ -135,11 +132,6 @@ repairing databases analysed before the parser existed:
    event's declared type is recovered too, so the comment carries
    `TNotifyEvent(Sender: TObject)`. See [docs/DFM.md](docs/DFM.md).
 
-## What metadata cannot reach
-
-Delphi emits metadata for classes and published members only. Ordinary virtual
-methods and unit-level RTL procedures carry no metadata and require signatures.
-
 ## What this cannot recover
 
 Delphi emits metadata for classes, published members and types. It emits
@@ -147,24 +139,13 @@ nothing for unit-level procedures, and a VMT is a bare array of pointers with
 no parallel name table, so an ordinary virtual method's name exists in the
 binary only where some class publishes an entry for its slot.
 
-How much that leaves depends entirely on the era, because Delphi 2010's
-extended method array publishes protected members too, and it is where a
-modern binary keeps almost all of its method metadata. Counting the code
-addresses any VMT points at — its own vtable slots, the standard `TObject`
-slots, both method arrays, the dynamic table, interface vtables and property
-accessors — and how many of them come out named:
-
-| Binary | Era | Reachable | Named |
-| --- | --- | --- | --- |
-| `corpus/innosetup/Compil32.exe` | Delphi 3 | 1290 | 759 (59%) |
-| `corpus/grid2htm/Demo.exe` | Delphi 5 | 2576 | 1254 (49%) |
-| `corpus/gh_delphidoom/Launcher.exe` | Delphi 7 | 1875 | 1024 (55%) |
-| `corpus/gh_ipconfig_gui/FastNetConfig.exe` | Delphi 2009 | 2375 | 1867 (79%) |
-| `corpus/gh_imagewriter/ImageWriterSvc.exe` | Delphi 12 | 7298 | 6064 (83%) |
-
-The remainder are vtable slots no class names: private members, and every
-protected one in a pre-2010 binary. Naming those, and RTL routines like
-`Classes.ReadError`, requires additional WARP signatures.
+How much that leaves depends entirely on the era. Delphi 2010's extended method
+array publishes protected members too, and is where a modern binary keeps almost
+all of its method metadata, so a 2010-or-later binary gives up far more of its
+vtable than a Delphi 5 one does. What remains in either case is the slots no
+class names: private members, and every protected one in a pre-2010 binary.
+Naming those, and RTL routines like `Classes.ReadError`, requires additional
+WARP signatures.
 
 ## Accuracy notes
 
