@@ -116,6 +116,29 @@ compiler already laid the code out and wrote the relocations. That pipeline is
 constraint is the input rather than the method: the packages have to come from
 somewhere.
 
+## What ships is not what those four produce
+
+Each pipeline builds one release's library in isolation, and until now that was
+also what shipped. It should not have been. A routine unchanged between Delphi
+4 and Delphi 2007 gets signed by all seven of those builds, under whatever
+spelling of the unit name each one's input happened to use, and the plugin then
+loads all seven at once. Measured across the shipped set: 466,657
+(library, GUID) claims over 236,186 distinct GUIDs, and 35,288 GUIDs claimed
+under more than one name. Duplicate claims cost matches, and — because Binary
+Ninja enumerates WARP containers in a fresh random order every process start —
+they cost *reproducibility*: on `corpus/grid2htm/Demo.exe`, 1,892 of 4,197
+matched addresses changed name between runs of the same binary against the same
+libraries.
+
+So a fifth step sits between the four builders and `signatures/`.
+`coalesce.py` reads the per-release libraries and writes an era's worth of them
+back out with each GUID claimed by exactly one of them, as a shared
+`core-<era>` plus a `<release>-only` delta each. That pipeline is
+[COALESCE.md](COALESCE.md). The
+per-release libraries remain what the builders produce and what to rebuild when
+a knowledge base improves; coalescing is a transformation applied to them
+rather than a replacement for them.
+
 ## Modules
 
 | File | Contents |
@@ -137,6 +160,7 @@ somewhere.
 | `tools/bplgen.py` | Package analysis, prototypes and `.warp` generation |
 | `tools/build_bpl.py` | Builds one library from a release's packages |
 | `tools/bpleval.py` | A package's export names against an independent library |
+| `tools/coalesce.py` | Per-era core and deltas out of the per-release libraries ([COALESCE.md](COALESCE.md)) |
 
 ## Attribution
 

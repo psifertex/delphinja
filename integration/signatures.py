@@ -163,27 +163,58 @@ def bundled():
 # `10.4` joins the same era on the same terms and is built on the same rule:
 # out of the 10.4 Sydney runtime packages' export tables, with every GUID any
 # already-shipped library claims excluded. See tools/BPL.md.
+#
+# The tags below are the *coalesced* set `tools/coalesce.py` writes, not the
+# per-release libraries the pipelines in tools/ produce. Those were built one
+# release at a time and never compared, so 49.4% of what they held between them
+# was a second claim on a GUID another one already had -- and where the two
+# claims spelled the name differently, the matcher had no way to choose. Across
+# containers it does not even notice, and picks whichever container the core
+# happened to enumerate first, which is a fresh random permutation every
+# process start; within one container it notices and declines. Measured on
+# corpus/grid2htm/Demo.exe, that made 1,892 of 4,197 matched addresses change
+# name between runs of the same binary against the same libraries.
+#
+# So an era's libraries are now disjoint by construction: `core-<era>` holds
+# every GUID more than one of the era's releases claimed, once, under the
+# spelling those releases voted for, and `<release>-only` holds what is left to
+# that release alone. No two libraries an era loads claim the same GUID, which
+# is what makes the result reproducible. See tools/COALESCE.md.
 DELPHI_ERAS = {
-    4: ["2"],
-    5: ["3"],
-    8: ["4", "5", "6", "7", "2005", "2006", "2007"],
-    11: ["2009", "2010", "2011", "2012", "2013", "2014", "xe2plus", "10.4"],
-    14: ["2009", "2010", "2011", "2012", "2013", "2014", "xe2plus", "10.4"],
+    4: ["2-only"],
+    5: ["3-only"],
+    8: ["core-8", "4-only", "5-only", "6-only", "7-only",
+        "2005-only", "2006-only", "2007-only"],
+    11: ["core-11", "2009-only", "2010-only", "2011-only", "2012-only",
+         "2013-only", "2014-only", "xe2plus-only", "10.4-only"],
+    14: ["core-11", "2009-only", "2010-only", "2011-only", "2012-only",
+         "2013-only", "2014-only", "xe2plus-only", "10.4-only"],
 }
+
+#: Every tag `delphi_tags` may return, in era order. An explicit list rather
+#: than a directory listing: `signatures/` is also where a rebuild stages its
+#: output, and picking up a stray per-release library beside the coalesced ones
+#: would put back exactly the duplicate claims coalescing removes. Rebuild with
+#: `tools/coalesce.py`; see tools/COALESCE.md.
+DELPHI_LIBRARIES = [t for era in (4, 5, 8, 11) for t in DELPHI_ERAS[era]]
 
 
 def delphi_tags(layout=None):
     """The Delphi knowledge base tags to load for a binary of this layout.
 
     With no layout -- a caller that has not scanned, or an era this build does
-    not recognise -- every shipped library is the honest answer. Loading one
+    not recognise -- every coalesced library is the honest answer. Loading one
     that cannot match costs a lookup; failing to load one that could have
     matched costs the match itself, so breadth is the safer failure.
+
+    Breadth is not free even now. Coalescing is scoped to an era, because an
+    era is what loads together, so 15,529 GUIDs are still claimed by two eras
+    and 7,530 of those under different names. Only this fallback ever loads two
+    eras at once, and it is a large improvement on the 35,288 disagreements the
+    per-release set carried, but it is not zero.
     """
-    shipped = [os.path.basename(p)[len("delphi-rtl-"):-len(".warp")]
-               for p in bundled() if os.path.basename(p).startswith("delphi-rtl-")]
     era = DELPHI_ERAS.get(layout.n_virtuals) if layout is not None else None
-    return shipped if era is None else [t for t in shipped if t in era]
+    return [t for t in (era or DELPHI_LIBRARIES) if library(t)]
 
 
 def register_fpc(bv, tag="Delphinja"):
