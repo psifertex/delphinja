@@ -26,3 +26,10 @@ fpc-research/
 experiments/
 
 .DS_Store
+
+# Malware samples fetched for corpus testing. Never ours to redistribute,
+# and not something to put in a repository under any circumstances.
+corpus-malware/
+
+# Local scratch, not part of the plugin.
+TODO.md
