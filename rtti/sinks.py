@@ -293,4 +293,4 @@ def self_pointer(bv, factory, vmt):
     """Pointer to the class struct for `vmt`, as a named type reference."""
     return Type.pointer(bv.arch, Type.named_type_reference(
         NamedTypeReferenceClass.StructNamedTypeClass,
-        factory.qname(vmt.name)))
+        factory.identity_name(vmt)))

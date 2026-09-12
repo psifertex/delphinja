@@ -39,12 +39,17 @@ def _probe(bv):
     """
     if signatures.fpc_version(bv) is not None:
         return True                 # Free Pascal: no VMTs, but libraries to load
+    # Win64 is supported here only for the shipped Free Pascal signatures.
+    # Absence of that evidence must not turn into an unvalidated Delphi x64
+    # RTTI scan.
+    if bv.arch is None or bv.arch.address_size != 4:
+        return False
     md = A.DelphiMetadata(bv)
     return P.find_vmt(md.reader, md._code_ranges, PROBE_LIMIT) is not None
 
 
 def is_valid(bv):
-    if bv is None or bv.arch is None or bv.arch.address_size != 4:
+    if bv is None or bv.arch is None or bv.arch.address_size not in (4, 8):
         return False
     if bv.view_type != "PE":
         return False
@@ -57,6 +62,16 @@ def is_valid(bv):
 def parse_info(debug_info, bv, debug_file, progress):
     """Contribute every recovered type, data variable and function name."""
     try:
+        # FPC carries no Delphi RTTI for this decoder to contribute.  The
+        # parser participates so it can register the matching WARP library;
+        # on Win64 in particular, stop there rather than implying Delphi x64
+        # metadata support.
+        fpc_version = signatures.fpc_version(bv)
+        if fpc_version is not None:
+            signatures.register_fpc(bv, TAG, version=fpc_version)
+            return True
+        if bv.arch is None or bv.arch.address_size != 4:
+            return False
         md = A.DelphiMetadata(bv)
         cancelled = [False]
 

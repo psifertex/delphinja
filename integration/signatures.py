@@ -112,9 +112,10 @@ def _first_match(bv, pattern):
     return bytes(found[1]) if found else None
 
 
-def fpc_tags(bv):
+def fpc_tags(bv, version=None):
     """The Free Pascal library tags to load for this binary, if any."""
-    version = fpc_version(bv)
+    if version is None:
+        version = fpc_version(bv)
     if version is None:
         return []
     series = ".".join(version.split(".")[:2])
@@ -217,9 +218,9 @@ def delphi_tags(layout=None):
     return [t for t in (era or DELPHI_LIBRARIES) if library(t)]
 
 
-def register_fpc(bv, tag="Delphinja"):
+def register_fpc(bv, tag="Delphinja", version=None):
     """Register the Free Pascal library matching this binary, if any."""
-    return register(fpc_tags(bv), tag, kind="fpc")
+    return register(fpc_tags(bv, version), tag, kind="fpc")
 
 
 def register(tags, tag="Delphinja", kind="delphi"):

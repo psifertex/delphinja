@@ -13,7 +13,9 @@ Binary Ninja workflow for Delphi and the Visual Component Library (VCL). Include
   strips the symbols from. These ship with the plugin and are loaded when a
   Delphi binary is recognised, so nothing has to be copied into a signature
   directory.
-Delphi 2 through 13 are supported, and Free Pascal 2.6 through 3.2. The VMT
+Delphi 2 through 13 are supported, and Free Pascal 2.6 through 3.2. Delphi
+metadata recovery currently targets Win32; Free Pascal runtime signatures
+cover both Win32 and Win64 when an FPC version marker is present. The VMT
 layout is detected per binary, and every offset is derived from it rather than
 written down, which is what lets one build read every version. Delphi 2 is the
 one era whose VMT keeps no self-pointer to be found by, so its classes are

@@ -457,7 +457,7 @@ _ORD_WIDTH = {"otSByte": (1, True), "otUByte": (1, False),
 
 
 class TypeFactory(object):
-    """Builds Binary Ninja types out of RTTI records, memoised by name."""
+    """Builds Binary Ninja types out of RTTI records, memoised by identity."""
 
     def __init__(self, md, prefix="", sink=None):
         self.md = md
@@ -474,10 +474,24 @@ class TypeFactory(object):
     def qname(self, name):
         return self.prefix + sanitize(name)
 
+    def identity_name(self, record):
+        """The stable name of a compiler-declared type.
+
+        A short type name is only unique inside its Delphi unit.  Data
+        variables have always used ``DelphiMetadata.qualified`` for that
+        reason; definitions and every named reference must make the same
+        choice or two units declaring (for example) ``TState`` silently share
+        whichever definition happened to be visited first.
+
+        Structural types synthesized by this factory have no source record
+        and continue to use ``qname`` or their existing shape-derived names.
+        """
+        return self.prefix + self.md.qualified(record)
+
     # -- enumerations -----------------------------------------------------
 
     def enum_type(self, ti):
-        name = self.qname(ti.name)
+        name = self.identity_name(ti)
         width, signed = _ORD_WIDTH.get(ti.data.get("OrdType"), (1, False))
         if name not in self.defined:
             lo = ti.data.get("MinValue") or 0
@@ -497,7 +511,7 @@ class TypeFactory(object):
 
     def class_type(self, vmt, class_props):
         """Define a struct for `vmt`, deriving from its parent's struct."""
-        name = self.qname(vmt.name)
+        name = self.identity_name(vmt)
         if name in self.defined:
             return name
         self.defined[name] = True          # set first: guards parent cycles
@@ -581,7 +595,7 @@ class TypeFactory(object):
                 cls = self.md.vmts.get(self.md.reader.u32(pcls) if pcls else None)
             ftype = (Type.pointer(self.bv.arch, Type.named_type_reference(
                 NamedTypeReferenceClass.StructNamedTypeClass,
-                self.qname(cls.name))) if cls
+                self.identity_name(cls))) if cls
                 else Type.pointer(self.bv.arch, Type.void()))
             seen[f["offset"]] = (sanitize(f["name"]), ftype)
 
@@ -629,6 +643,28 @@ class TypeFactory(object):
             self.structs += 1
         return Type.named_type_reference(
             NamedTypeReferenceClass.StructNamedTypeClass, name, width=8)
+
+    def record_type(self, ti):
+        """Define the opaque extent of a record under its unit-qualified name.
+
+        Extended RTTI publishes the size of a record but not ordinary field
+        names, so an opaque packed structure is the strongest honest shape.
+        Giving it a named identity still matters: properties and typed
+        pointers can now refer to the right ``Unit_Type`` instead of an
+        interchangeable byte array, including when another unit declares the
+        same short name.
+        """
+        name = self.identity_name(ti)
+        width = max(1, ti.data.get("Size") or 4)
+        if name not in self.defined:
+            sb = StructureBuilder.create()
+            sb.packed = True
+            sb.width = width
+            self.sink.add_type(name, Type.structure_type(sb))
+            self.defined[name] = True
+            self.structs += 1
+        return Type.named_type_reference(
+            NamedTypeReferenceClass.StructNamedTypeClass, name, width=width)
 
     # -- the tables that reach code -------------------------------------
 
@@ -812,7 +848,7 @@ class TypeFactory(object):
             if cls is not None:
                 return Type.pointer(arch, Type.named_type_reference(
                     NamedTypeReferenceClass.StructNamedTypeClass,
-                    self.qname(cls.name)))
+                    self.identity_name(cls)))
             return Type.pointer(arch, Type.void())
         if k == 8:                                       # method pointer
             return self.method_type()
@@ -830,9 +866,11 @@ class TypeFactory(object):
             # decompile as its first letter -- is wrong about the element,
             # not just about the encoding.
             return Type.pointer(arch, Type.wide_char(2))
-        if k in (13, 14, 22):                     # array / record / mrecord
+        if k == 13:                                      # static array
             size = ti.data.get("Size") or 4
             return Type.array(Type.int(1, False), max(1, size))
+        if k in (14, 22):                                # record / mrecord
+            return self.record_type(ti)
         if k == 20:                                      # typed pointer
             # `Pointer` itself publishes no RefType, and a type that points at
             # itself -- a linked-list node -- would otherwise recurse forever,
@@ -978,11 +1016,14 @@ class Applier(object):
                 except Exception as exc:
                     bn.log_warn("class %s: %s" % (vmt.name, exc), TAG)
             for ti in md.typeinfos.values():
-                if ti.kind == 3:
+                if ti.kind in (3, 14, 22):
                     try:
-                        self.factory.enum_type(ti)
+                        if ti.kind == 3:
+                            self.factory.enum_type(ti)
+                        else:
+                            self.factory.record_type(ti)
                     except Exception as exc:
-                        bn.log_warn("enum %s: %s" % (ti.name, exc), TAG)
+                        bn.log_warn("type %s: %s" % (ti.name, exc), TAG)
 
         if self.opt["data_vars"] or self.opt["comments"]:
             # Literals first: an RTTI record is the stronger evidence, so on

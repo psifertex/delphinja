@@ -39,6 +39,7 @@ TAG = A.TAG
 # How far into a code section to look for the first VMT before giving up.
 # Eligibility runs on every matching load, so it must not become a full scan.
 PROBE_LIMIT = 0x40000
+RECOVERY_PLATFORMS = ["windows-x86", "windows-x86_64"]
 
 
 def probe(bv):
@@ -61,6 +62,11 @@ def probe(bv):
     # lookup settles it, so ask first.
     if signatures.fpc_version(bv) is not None:
         return True
+    # The shipped Win64 support is an FPC WARP library, not a claim that this
+    # 32-bit Delphi RTTI decoder understands Win64 Delphi layouts.  Once the
+    # positive FPC test fails, do not inspect an eight-byte view as Delphi.
+    if bv.arch is None or bv.arch.address_size != 4:
+        return False
     md = A.DelphiMetadata(bv)
     return P.find_vmt(md.reader, md._code_ranges, PROBE_LIMIT) is not None
 
@@ -86,7 +92,12 @@ def _recover(context):
         # Independent of any Delphi metadata, and cheap, so do it before the
         # scan rather than after: a Free Pascal binary has nothing for the
         # scan to find but still wants its runtime library loaded.
-        signatures.register_fpc(bv, TAG)
+        fpc_version = signatures.fpc_version(bv)
+        if fpc_version is not None:
+            signatures.register_fpc(bv, TAG, version=fpc_version)
+            return
+        if bv.arch is None or bv.arch.address_size != 4:
+            return
         md = A.DelphiMetadata(bv).scan()
         # Now that the layout is known, load the signature libraries that can
         # plausibly match this binary -- and only those. This runs before WARP
@@ -163,7 +174,7 @@ def register():
                 "runOnce": True,
                 "auto": {},
                 "predicates": [
-                    {"type": "platform", "value": ["windows-x86"],
+                    {"type": "platform", "value": RECOVERY_PLATFORMS,
                      "operator": "in"},
                     {"type": "setting", "identifier": ACTIVITY, "value": True},
                 ],
