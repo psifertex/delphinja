@@ -536,6 +536,7 @@ def find_streams(r, ranges, progress=None):
         # stream that spans a chunk boundary from being parsed twice.
         past = start
         while addr < end:
+            P.check_progress(progress, done, end - start)
             size = min(_CHUNK, end - addr)
             # Overlap by the signature length so a stream straddling a chunk
             # boundary is still found.
@@ -551,8 +552,7 @@ def find_streams(r, ranges, progress=None):
                 off = data.find(MAGIC, off + 1)
             done += size
             addr += size
-            if progress is not None and not progress(done, end - start):
-                return out
+        P.check_progress(progress, done, end - start)
     out.sort(key=lambda o: o.addr)
     return out
 

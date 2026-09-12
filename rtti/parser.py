@@ -265,7 +265,23 @@ class Layout(object):
 DEFAULT_LAYOUT = Layout()
 
 
-def detect_layout(reader, ranges, window=0x40000, ptr_sizes=(4, 8)):
+class ScanCancelled(Exception):
+    """A caller asked a metadata scan to stop.
+
+    This is control flow, not a parse failure.  The integration layers catch
+    it without logging an error, while the scanners raise it rather than
+    returning a prefix that a caller could mistake for a complete result.
+    """
+
+
+def check_progress(progress, done, total):
+    """Report scan progress and raise when the caller cancels."""
+    if progress is not None and progress(done, max(total, 1)) is False:
+        raise ScanCancelled()
+
+
+def detect_layout(reader, ranges, window=0x40000, ptr_sizes=(4, 8),
+                  progress=None):
     """Work out which dialect a binary uses by asking it.
 
     Fingerprinting the compiler from strings is unreliable -- most binaries
@@ -290,7 +306,8 @@ def detect_layout(reader, ranges, window=0x40000, ptr_sizes=(4, 8)):
         for start, end in ranges:
             limit = min(end, start + window)
             for addr in self_pointers(reader, start, limit, by_size.keys(),
-                                      step=ptr_size, width=ptr_size):
+                                      step=ptr_size, width=ptr_size,
+                                      progress=progress):
                 val = read(addr)
                 if val is None:
                     continue
@@ -314,7 +331,8 @@ def detect_layout(reader, ranges, window=0x40000, ptr_sizes=(4, 8)):
             score = 0
             for start, end in ranges:
                 score += len(linked_class_anchors(
-                    reader, start, min(end, start + window), layout))
+                    reader, start, min(end, start + window), layout,
+                    progress=progress))
             scores[layout] = score
         for layout in layouts:
             score = scores.get(layout, 0)
@@ -394,7 +412,8 @@ _TYPECODES = {4: "I", 8: "Q"}
 _CHUNK = 0x10000
 
 
-def self_pointers(reader, start, end, deltas, step=1, width=4):
+def self_pointers(reader, start, end, deltas, step=1, width=4,
+                  progress=None):
     """Yield, in ascending order, the addresses in [start, end) that point at
     themselves.
 
@@ -422,6 +441,7 @@ def self_pointers(reader, start, end, deltas, step=1, width=4):
     typecode = _TYPECODES.get(width)
     block = max(_CHUNK, width)
     for base in range(start, end, block):
+        check_progress(progress, base - start, end - start)
         stop = min(base + block, end)
         data = reader.bytes(base, stop - base) if typecode else b""
         if len(data) != stop - base:
@@ -453,6 +473,7 @@ def self_pointers(reader, start, end, deltas, step=1, width=4):
         hits.sort()
         for addr in hits:
             yield addr
+    check_progress(progress, end - start, end - start)
 
 
 def is_identifier(text, min_len=1, max_len=255):
@@ -557,7 +578,7 @@ def _class_head(r, addr, layout):
             "parent": parent}
 
 
-def class_anchors(r, start, end, layout):
+def class_anchors(r, start, end, layout, progress=None):
     """Yield (class pointer, head) for every plausible VMT in [start, end)
     under a layout with no self-pointer to key on.
 
@@ -579,6 +600,7 @@ def class_anchors(r, start, end, layout):
     # word locates the whole header.
     size_off = layout.slot_offset("vmtInstanceSize")
     for base in range(start, end, _CHUNK):
+        check_progress(progress, base - start, end - start)
         stop = min(base + _CHUNK, end)
         data = r.bytes(base, stop - base) if typecode else b""
         if len(data) != stop - base:
@@ -592,9 +614,10 @@ def class_anchors(r, start, end, layout):
             head = _class_head(r, addr - size_off, layout)
             if head is not None:
                 yield addr - size_off, head
+    check_progress(progress, end - start, end - start)
 
 
-def linked_class_anchors(r, start, end, layout):
+def linked_class_anchors(r, start, end, layout, progress=None):
     """`class_anchors` reduced to the candidates that form a hierarchy.
 
     A single header-shaped run of words happens by accident all the time: 91
@@ -611,7 +634,7 @@ def linked_class_anchors(r, start, end, layout):
     wrong one: it discards all 92 of those accidents, and of the 1,058
     genuine classes across the 23 Delphi 2 binaries it discards none.
     """
-    heads = dict(class_anchors(r, start, end, layout))
+    heads = dict(class_anchors(r, start, end, layout, progress))
     linked = set()
     for addr, head in heads.items():
         if head["parent"] in heads:
@@ -1501,8 +1524,7 @@ def scan(r, start, end, progress=None):
     vmts, typeinfos = {}, {}
     step = max(1, (end - start) // 100)
     for chunk in range(start, end, step):
-        if progress and progress(chunk - start, end - start) is False:
-            break
+        check_progress(progress, chunk - start, end - start)
         for addr in self_pointers(r, chunk, min(chunk + step, end), candidates):
             val = r.u32(addr)
             if self_ptr and val == addr + header_size:
@@ -1515,10 +1537,11 @@ def scan(r, start, end, progress=None):
                     ti.ptr_addr = addr
                     typeinfos[ti.addr] = ti
     if not self_ptr:
-        for addr in linked_class_anchors(r, start, end, r.layout):
+        for addr in linked_class_anchors(r, start, end, r.layout, progress):
             v = parse_vmt(r, addr)
             if v:
                 vmts[v.addr] = v
+    check_progress(progress, end - start, end - start)
     return vmts, typeinfos
 
 
@@ -1694,7 +1717,7 @@ def parse_string(r, addr, limit=None):
     return parse_strrec(r, addr, limit) or parse_ansistring(r, addr, limit)
 
 
-def scan_strings(r, start, end, align=4):
+def scan_strings(r, start, end, align=4, progress=None):
     """Yield every string constant in [start, end), in ascending order.
 
     The refcount is the anchor, and both header shapes hang off it, so one
@@ -1708,6 +1731,7 @@ def scan_strings(r, start, end, align=4):
     first = start + -start % align
     block = max(_CHUNK, align)
     for base in range(first, end, block):
+        check_progress(progress, base - start, end - start)
         stop = min(base + block, end)
         data = r.bytes(base, stop - base)
         if len(data) == stop - base and align == 4:
@@ -1721,6 +1745,7 @@ def scan_strings(r, start, end, align=4):
             literal = parse_string(r, addr, end)
             if literal is not None:
                 yield literal
+    check_progress(progress, end - start, end - start)
 
 
 def cluster(addrs, gap=0x200):
@@ -1926,7 +1951,8 @@ def _runs(classified, min_chars, text, nul, max_chars=None):
 
 
 def headerless_candidates(r, start, end, wide=False,
-                          min_chars=MIN_HEADERLESS_CHARS, align=4):
+                          min_chars=MIN_HEADERLESS_CHARS, align=4,
+                          progress=None):
     """Every run in [start, end) shaped like a header-less constant.
 
     Shape only: an aligned, maximal, NUL-terminated run of text long enough to
@@ -1950,6 +1976,7 @@ def headerless_candidates(r, start, end, wide=False,
     # block gets one element of look-behind (to prove maximality) and enough
     # look-ahead to see the longest permitted body and its terminator.
     for core in range(start, end, _CHUNK):
+        check_progress(progress, core - start, end - start)
         core_end = min(core + _CHUNK, end)
         window_start = max(start, core - elem)
         window_end = min(end, core_end + MAX_STRING_LENGTH * elem + elem)
@@ -1982,9 +2009,10 @@ def headerless_candidates(r, start, end, wide=False,
             # as nothing; keep the final predicate for both widths.
             if valid(raw):
                 yield CharArrayLiteral(addr, length, raw, elem)
+    check_progress(progress, end - start, end - start)
 
 
-def pointer_targets(r, ranges, targets):
+def pointer_targets(r, ranges, targets, progress=None):
     """Which of `targets` some dword in `ranges` holds.
 
     x86 takes the address of a constant as an immediate -- `mov ebx, offset`,
@@ -2002,6 +2030,7 @@ def pointer_targets(r, ranges, targets):
     for start, end in ranges:
         carry = b""
         for base in range(start, end, _CHUNK):
+            check_progress(progress, base - start, end - start)
             stop = min(base + _CHUNK, end)
             chunk = _range_bytes(r, base, stop)
             data = carry + chunk
@@ -2013,6 +2042,7 @@ def pointer_targets(r, ranges, targets):
                 found |= want.intersection(
                     view[phase:phase + 4 * count].cast("I"))
             carry = data[-3:]
+        check_progress(progress, end - start, end - start)
     return found
 
 
@@ -2039,7 +2069,7 @@ def _outside(spans):
 
 
 def scan_headerless_strings(r, ranges, claimed=(), ref_ranges=None, wide=None,
-                            min_chars=MIN_HEADERLESS_CHARS):
+                            min_chars=MIN_HEADERLESS_CHARS, progress=None):
     """Every header-less string constant in `ranges`, in ascending order.
 
     Three tests, and each one is load-bearing:
@@ -2071,12 +2101,12 @@ def scan_headerless_strings(r, ranges, claimed=(), ref_ranges=None, wide=None,
     for start, end in ranges:
         for is_wide in ((False, True) if wide else (False,)):
             for lit in headerless_candidates(r, start, end, is_wide,
-                                             min_chars):
+                                             min_chars, progress=progress):
                 if outside(lit.addr, lit.end):
                     candidates.append(lit)
     referenced = pointer_targets(
         r, ranges if ref_ranges is None else ref_ranges,
-        [lit.addr for lit in candidates])
+        [lit.addr for lit in candidates], progress=progress)
     accepted, reach = [], None
     for lit in sorted(candidates, key=lambda c: (c.addr, -c.length)):
         # Runs of one width never overlap -- the regex consumes each one --

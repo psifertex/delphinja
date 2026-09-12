@@ -48,18 +48,23 @@ class _Task(BackgroundTaskThread):
     def run(self):
         try:
             self.fn(self)
+        except P.ScanCancelled:
+            # Cancellation is an ordinary user choice.  The scanner raises so
+            # no caller can confuse a partial result for a completed one, but
+            # it should not produce an error toast or traceback here.
+            return
         except Exception as exc:
             bn.log_error("%s failed: %s" % (self.progress or "task", exc), TAG)
             raise
 
-    def scan(self, ranges=None):
-        md = A.DelphiMetadata(self.bv)
-
+    def scan(self, ranges=None, scan_dfm=False):
         def progress(done, total):
             self.progress = "Delphi RTTI: scanning %d%%" % (100 * done // max(total, 1))
             return not self.cancelled
 
-        md.scan(ranges, progress)
+        md = A.DelphiMetadata(self.bv, progress)
+        md.scan(ranges, progress, scan_dfm=scan_dfm)
+        P.check_progress(progress, 1, 1)
         return md
 
 
@@ -130,7 +135,9 @@ def cmd_apply(bv):
     ][choice]
 
     def work(task):
-        md = task.scan()
+        scan_dfm = (options.get("rename_functions", True) and
+                    options.get("dfm_events", A.setting("dfm")))
+        md = task.scan(scan_dfm=scan_dfm)
         task.progress = "Delphi RTTI: applying"
         stats = A.Applier(md, options).run()
         bv.update_analysis()
@@ -145,7 +152,8 @@ def cmd_apply(bv):
 def cmd_scan_range(bv, addr, length):
     """Scan just the selection, then apply everything found in it."""
     def work(task):
-        md = task.scan([(addr, addr + max(length, 1))])
+        md = task.scan([(addr, addr + max(length, 1))],
+                       scan_dfm=A.setting("dfm"))
         A.Applier(md).run()
         bv.update_analysis()
 

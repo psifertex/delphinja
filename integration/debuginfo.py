@@ -72,20 +72,15 @@ def parse_info(debug_info, bv, debug_file, progress):
             return True
         if bv.arch is None or bv.arch.address_size != 4:
             return False
-        md = A.DelphiMetadata(bv)
-        cancelled = [False]
-
         def report(done, total):
             if progress is not None and not progress(done, max(total, 1)):
-                cancelled[0] = True
                 return False
             return True
 
         t0 = time.time()
-        md.scan(None, report)
+        md = A.DelphiMetadata(bv, report)
+        md.scan(None, report, scan_dfm=A.setting("dfm"))
         t_scan = time.time() - t0
-        if cancelled[0]:
-            return False
         # Only on evidence -- see the note in workflow.py.
         if md.vmts:
             signatures.register_delphi(md.layout, TAG)
@@ -106,6 +101,8 @@ def parse_info(debug_info, bv, debug_file, progress):
                     % (stats["functions_named"], stats["data_vars"],
                        stats["structs"] + stats["enums"]), TAG)
         return True
+    except P.ScanCancelled:
+        return False
     except Exception as exc:
         bn.log_error("parse failed: %s" % exc, TAG)
         return False

@@ -93,7 +93,7 @@ class DelphiMetadata(object):
     READ_CHUNK = 0x10000
     READ_CACHE_CHUNKS = 8
 
-    def __init__(self, bv):
+    def __init__(self, bv, progress=None):
         self.bv = bv
         self._code_ranges = [
             (s.start, s.end) for s in bv.sections.values()
@@ -116,7 +116,8 @@ class DelphiMetadata(object):
         # every modern binary.
         layout, self.layout_score = P.detect_layout(
             self.reader, self._code_ranges,
-            ptr_sizes=(bv.address_size,) if bv.address_size in (4, 8) else (4,))
+            ptr_sizes=(bv.address_size,) if bv.address_size in (4, 8) else (4,),
+            progress=progress)
         if layout is not None:
             self.reader.layout = layout
         self.layout = self.reader.layout
@@ -124,6 +125,9 @@ class DelphiMetadata(object):
         self.typeinfos = {}
         self.strings = {}
         self.char_arrays = {}
+        # None means this optional whole-image pass was not requested.  An
+        # empty list means it ran to completion and found no form streams.
+        self.dfm_streams = None
         self._children = None
         self._interfaces = None
         self._uregions = None
@@ -174,47 +178,76 @@ class DelphiMetadata(object):
 
     # -- scanning ---------------------------------------------------------
 
-    def scan(self, ranges=None, progress=None):
+    def scan(self, ranges=None, progress=None, scan_dfm=False):
+        """Atomically add everything found in ``ranges``.
+
+        Each scanner writes to private dictionaries first.  If a progress
+        callback cancels any pass, ``ScanCancelled`` escapes and the metadata
+        already visible on this object is left untouched; a caller can never
+        accidentally publish the prefix found before cancellation.
+        """
         if ranges is None:
             ranges = self._code_ranges or [(self.bv.start, self.bv.end)]
+        ranges = list(ranges)
+        vmts = dict(self.vmts)
+        typeinfos = dict(self.typeinfos)
+        strings = dict(self.strings)
+        char_arrays = dict(self.char_arrays)
         for start, end in ranges:
             v, t = P.scan(self.reader, start, end, progress)
-            self.vmts.update(v)
-            self.typeinfos.update(t)
-            for literal in P.scan_strings(self.reader, start, end):
-                self.strings[literal.addr] = literal
-            self._children = None
-            self._interfaces = None
-            self._uregions = None
-            self._uevidence = None
-            self._class_ti = None
-        self._scan_char_arrays(ranges)
-        return self
-
-    def _scan_char_arrays(self, ranges):
-        """Recover the constants that carry no header, after everything that
-        does.
-
-        Order is the whole point: a header-less run is accepted only where no
-        record already accounts for the bytes, so every VMT, TTypeInfo and
-        header-validated literal has to be known first.  That also means this
-        cannot run per range like the rest of the scan -- a record found in
-        one section still rules a run in another out.
-
-        References are looked for across the whole image rather than the code
-        sections alone.  A PChar constant reached through an initialised
-        pointer in .data is referenced by exactly one dword and that dword is
-        not in the code, and on the corpus restricting the search to
-        executable ranges lost 47 of 75 in ImageWriterSvc and 55 of 83 in
-        DX.HttpDiag -- all of them genuine.
-        """
-        claimed = [(s, e) for s, e, _ in self.spans()]
+            vmts.update(v)
+            typeinfos.update(t)
+            for literal in P.scan_strings(
+                    self.reader, start, end, progress=progress):
+                strings[literal.addr] = literal
+        # Header-less constants are accepted only after every stronger record
+        # is known, and their references may live in any image section.  Keep
+        # both passes inside this transaction: either all constants become
+        # visible together, or cancellation leaves the old result untouched.
+        claimed = [(s, e) for s, e, _ in self._spans(
+            vmts, typeinfos, strings, char_arrays)]
         image = [(s.start, s.end) for s in self.bv.sections.values()]
         for literal in P.scan_headerless_strings(
-                self.reader, ranges, claimed, ref_ranges=image or ranges):
-            self.char_arrays[literal.addr] = literal
+                self.reader, ranges, claimed, ref_ranges=image or ranges,
+                progress=progress):
+            char_arrays[literal.addr] = literal
+        streams = self.dfm_streams
+        if scan_dfm:
+            streams = dfm.find_streams(
+                self.reader, dfm.view_ranges(self.bv), progress)
+
+        # Commit only after every requested pass completed.
+        P.check_progress(progress, 1, 1)
+        self.vmts = vmts
+        self.typeinfos = typeinfos
+        self.strings = strings
+        self.char_arrays = char_arrays
+        self.dfm_streams = streams
+        self._children = None
+        self._interfaces = None
+        self._uregions = None
+        self._uevidence = None
+        self._class_ti = None
+        return self
 
     # -- derived views ----------------------------------------------------
+
+    @staticmethod
+    def _spans(vmts, typeinfos, strings, char_arrays):
+        """Build spans from either committed or transaction-local results."""
+        out = []
+        for ti in typeinfos.values():
+            start = ti.ptr_addr if ti.ptr_addr is not None else ti.addr
+            out.append((start, ti.end, "TypeInfo %s" % ti.name))
+        for v in vmts.values():
+            out.append((v.header, v.vtable_end, "VMT %s" % v.name))
+            for s, e, label in v.regions:
+                out.append((s, e, "%s %s" % (label, v.name)))
+        for literal in strings.values():
+            out.append((literal.addr, literal.end, literal.kind))
+        for literal in char_arrays.values():
+            out.append((literal.addr, literal.end, literal.kind))
+        return sorted(out)
 
     def spans(self, strings=True):
         """Every (start, end, label) byte range that metadata occupies.
@@ -224,20 +257,10 @@ class DelphiMetadata(object):
         overlapping one is bogus.  `strings=False` restricts the answer to the
         RTTI records, which is what unit inference reasons about.
         """
-        out = []
-        for ti in self.typeinfos.values():
-            start = ti.ptr_addr if ti.ptr_addr is not None else ti.addr
-            out.append((start, ti.end, "TypeInfo %s" % ti.name))
-        for v in self.vmts.values():
-            out.append((v.header, v.vtable_end, "VMT %s" % v.name))
-            for s, e, label in v.regions:
-                out.append((s, e, "%s %s" % (label, v.name)))
-        if strings:
-            for literal in self.strings.values():
-                out.append((literal.addr, literal.end, literal.kind))
-            for literal in self.char_arrays.values():
-                out.append((literal.addr, literal.end, literal.kind))
-        return sorted(out)
+        return self._spans(
+            self.vmts, self.typeinfos,
+            self.strings if strings else {},
+            self.char_arrays if strings else {})
 
     def regions(self, gap=0x40, strings=True):
         """Coalesced metadata regions, the answer to 'where else is this?'."""
@@ -1249,7 +1272,8 @@ class Applier(object):
         if not self.opt["dfm_events"]:
             return
         md = self.md
-        streams = dfm.find_streams(md.reader, dfm.view_ranges(self.bv))
+        streams = (md.dfm_streams if getattr(md, "dfm_streams", None) is not None else
+                   dfm.find_streams(md.reader, dfm.view_ranges(self.bv)))
         bindings, unbound = dfm.bind(md, streams)
         self.stats["dfm_streams"] = len(streams)
         self.stats["dfm_events_bound"] = len(bindings)
