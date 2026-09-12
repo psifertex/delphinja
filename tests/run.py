@@ -65,6 +65,9 @@ def main():
     parser.add_argument(
         "--setting", action="append", default=[], metavar="KEY=JSON",
         help="override one setting in the disposable profile (repeatable)")
+    parser.add_argument(
+        "--corpus-smoke", nargs="?", const="auto", metavar="PE",
+        help="opt in to opening and applying metadata to one real corpus PE")
     parser.add_argument("-q", "--quiet", action="store_true")
     parser.add_argument("--isolated-child", action="store_true",
                         help=argparse.SUPPRESS)
@@ -78,6 +81,21 @@ def main():
 
     if not Path(bnenv.REAL, "license.dat").is_file():
         parser.error("Binary Ninja's real user directory has no license.dat")
+
+    smoke = None
+    if args.corpus_smoke:
+        if args.corpus_smoke == "auto":
+            candidates = [
+                ROOT / "corpus/innosetup/ISCC.exe",
+                ROOT / "corpus/innosetup/MyDll.dll",
+            ]
+            smoke = next((path for path in candidates if path.is_file()), None)
+            if smoke is None:
+                parser.error("--corpus-smoke found no local corpus PE")
+        else:
+            smoke = Path(args.corpus_smoke).expanduser().resolve()
+            if not smoke.is_file():
+                parser.error("corpus smoke PE does not exist: %s" % smoke)
 
     settings = {
         "delphinja.commands": False,
@@ -101,6 +119,10 @@ def main():
         env["BN_USER_DIRECTORY"] = scratch
         env["DELPHINJA_REAL_USER_DIRECTORY"] = bnenv.REAL
         env["DELPHINJA_ROOT"] = str(ROOT)
+        if smoke is not None:
+            env["DELPHINJA_CORPUS_SMOKE"] = str(smoke)
+        else:
+            env.pop("DELPHINJA_CORPUS_SMOKE", None)
         env.pop("BN_DISABLE_USER_PLUGINS", None)
         env.pop("BN_DISABLE_USER_SETTINGS", None)
         # Import the package through the installed-plugin symlink as Binary

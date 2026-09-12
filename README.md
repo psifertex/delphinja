@@ -73,6 +73,16 @@ Use `--pattern 'test_parser.py'` to run one test module, or repeat
 `--setting KEY=JSON` to change settings in the disposable profile for a test
 run.
 
+Pass `--corpus-smoke path/to/sample.exe` to opt in to a real-PE integration
+check that scans and applies metadata in memory. `--corpus-smoke` without a
+path uses a known local corpus sample when one exists. This slower check is
+never part of the default suite or CI.
+
+GitHub CI runs `python3 tests/run_pure.py`, syntax checks, manifest validation,
+and evaluator CLI checks without a Binary Ninja license. The isolated
+`python3 tests/run.py` suite remains the authoritative check because it loads
+the plugin and exercises the Binary Ninja API.
+
 On macOS the runner prefers the development application. Set `BN_TEST_APP`
 to test another application bundle. On any platform, `BN_TEST_PYTHON` selects
 an interpreter explicitly; `BN_TEST_PYTHONPATH` and `BN_TEST_PYTHONHOME` can

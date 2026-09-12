@@ -1,0 +1,30 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  license-free:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check Python syntax
+        run: >-
+          python -m compileall -q __init__.py demangler.py integration rtti
+          tools tests
+      - name: Validate plugin manifest
+        run: python -m json.tool plugin.json >/dev/null
+      - name: Run license-free tests
+        run: python tests/run_pure.py
+      - name: Check evaluator command lines
+        run: |
+          python tools/evaluate.py --help >/dev/null
+          python tools/fpceval.py --help >/dev/null
+          python tools/bpleval.py --help >/dev/null

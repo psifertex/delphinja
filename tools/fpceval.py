@@ -23,20 +23,41 @@ compares code, not names.  Nor does it say anything about the functions that
 should have matched and did not; a byte-level check can only score the claims
 that were made.  A "verified" rate near 100% therefore means "the matcher is
 not confusing routines", not "the library is correct".
+
+Processing errors and empty input fail the command. With ``--ref``, zero
+checkable matches or a rate below ``--min-verified`` fail too. Use
+``--report-only`` for exploratory measurement and ``--allow-empty`` for an
+intentionally empty selection.
 """
 
+import argparse
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tools import bnenv       # noqa: E402
-bnenv.scratch_user_directory("/tmp/bn-fpc-eval")
+from tools import evalutil                                      # noqa: E402
 
-import binaryninja as bn      # noqa: E402
-from binaryninja import warp  # noqa: E402
 
-from tools import fpcgen, fpcname, fpcstage      # noqa: E402
+def _load_view(path):
+    import binaryninja as bn
+    return bn.load(path, update_analysis=True,
+                   options={"analysis.debugInfo.internal": False})
+
+
+def _warp_match(func):
+    from binaryninja import warp
+    return warp.WarpFunction.get_matched(func)
+
+
+def _disable_logs():
+    import binaryninja as bn
+    bn.disable_default_log()
+
+
+def _configure():
+    evalutil.configure_binary_ninja("delphinja-fpceval-")
+    _disable_logs()
 
 
 def reference_index(roots, log=print):
@@ -46,6 +67,7 @@ def reference_index(roots, log=print):
     them are dropped by `Unit::Class::Member`), so each name keeps a list and
     a match counts as verified if it agrees with any of them.
     """
+    from tools import fpcgen, fpcname, fpcstage
     paths = fpcgen.object_files(roots)
     oracle = fpcgen.case_oracle(paths, log)
     layout = fpcstage.Layout(paths, log=log)
@@ -76,6 +98,7 @@ def _same(binary_bytes, reference, holes):
 
 
 def register(libs):
+    from binaryninja import warp
     for path in libs:
         container = warp.WarpContainer.add(
             "fpceval %s" % os.path.basename(path))
@@ -84,70 +107,71 @@ def register(libs):
 
 def evaluate(path, index=None):
     out = {"file": os.path.basename(path), "size": os.path.getsize(path)}
-    bv = bn.load(path, update_analysis=True,
-                 options={"analysis.debugInfo.internal": False})
-    bv.update_analysis_and_wait()
-    funcs = list(bv.functions)
-    matched = {}
-    for f in funcs:
-        w = warp.WarpFunction.get_matched(f)
-        if w:
-            matched[f.start] = (w.name, f)
-    out["functions"] = len(funcs)
-    out["matched"] = len(matched)
-    if index is None:
-        bv.file.close()
+    bv = _load_view(path)
+    if bv is None:
+        raise RuntimeError("Binary Ninja could not open %s" % path)
+    try:
+        bv.update_analysis_and_wait()
+        funcs = list(bv.functions)
+        matched = {}
+        for f in funcs:
+            w = _warp_match(f)
+            if w:
+                matched[f.start] = (w.name, f)
+        out["functions"] = len(funcs)
+        out["matched"] = len(matched)
+        if index is None:
+            return out
+
+        checked = verified = 0
+        wrong = []
+        for addr, (name, func) in matched.items():
+            refs = index.get(name)
+            if not refs:
+                continue
+            checked += 1
+            size = max(r.end for r in func.address_ranges) - func.start
+            ok = False
+            for code, holes in refs:
+                try:
+                    got = bv.read(addr, len(code))
+                except Exception:
+                    break
+                if _same(got, code, holes):
+                    ok = True
+                    break
+            if ok:
+                verified += 1
+            elif len(wrong) < 5:
+                wrong.append((hex(addr), name, size))
+        out["checked"] = checked
+        out["verified"] = verified
+        out["wrong"] = wrong
         return out
-
-    checked = verified = 0
-    wrong = []
-    for addr, (name, func) in matched.items():
-        refs = index.get(name)
-        if not refs:
-            continue
-        checked += 1
-        size = max(r.end for r in func.address_ranges) - func.start
-        ok = False
-        for code, _holes in refs:
-            try:
-                got = bv.read(addr, len(code))
-            except Exception:
-                break
-            # A near-identical body is the normal case: the linker rewrote
-            # the call and address operands, and those bytes cannot agree.
-            if _same(got, code, _holes):
-                ok = True
-                break
-        if ok:
-            verified += 1
-        elif len(wrong) < 5:
-            wrong.append((hex(addr), name, size))
-    out["checked"] = checked
-    out["verified"] = verified
-    out["wrong"] = wrong
-    bv.file.close()
-    return out
+    finally:
+        bv.file.close()
 
 
-def main(argv):
-    corpus = argv[0]
-    libs, refs, limit, filt = [], [], None, None
-    i = 1
-    while i < len(argv):
-        if argv[i] == "--libs":
-            libs = argv[i + 1].split(",")
-            i += 2
-        elif argv[i] == "--ref":
-            refs = argv[i + 1].split(",")
-            i += 2
-        elif argv[i] == "--limit":
-            limit = int(argv[i + 1])
-            i += 2
-        elif argv[i] == "--filter":
-            filt = argv[i + 1]
-            i += 2
-        else:
-            i += 1
+def main(argv=None, configure=False):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("corpus")
+    parser.add_argument("--libs", help="comma-separated WARP libraries")
+    parser.add_argument("--ref", help="comma-separated reference object roots")
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--filter")
+    parser.add_argument("--min-verified", type=evalutil.percentage,
+                        default=100.0,
+                        help="minimum byte verification rate (default: 100)")
+    parser.add_argument("--allow-empty", action="store_true",
+                        help="allow an empty corpus or zero checkable matches")
+    parser.add_argument("--report-only", action="store_true",
+                        help="print failures but return success")
+    args = parser.parse_args(argv)
+    if configure:
+        _configure()
+    corpus = args.corpus
+    libs = args.libs.split(",") if args.libs else []
+    refs = args.ref.split(",") if args.ref else []
 
     if libs:
         register(libs)
@@ -163,20 +187,22 @@ def main(argv):
             if n.lower().endswith(".exe"):
                 files.append(os.path.join(root, n))
     files.sort()
-    if filt:
-        files = [f for f in files if filt in f]
-    if limit:
-        files = files[:limit]
+    if args.filter:
+        files = [f for f in files if args.filter in f]
+    if args.limit is not None:
+        files = files[:args.limit]
 
     print("%-36s %9s %7s %7s %6s %7s %8s"
           % ("file", "size", "funcs", "matched", "rate", "checked", "verified"))
-    tot_f = tot_m = tot_c = tot_v = 0
+    tot_f = tot_m = tot_c = tot_v = processed = errors = 0
     for p in files:
         try:
             r = evaluate(p, index)
         except Exception as exc:                            # noqa: BLE001
             print("%-36s  ERROR %s" % (os.path.basename(p)[:36], exc))
+            errors += 1
             continue
+        processed += 1
         rate = 100.0 * r["matched"] / max(r["functions"], 1)
         print("%-36s %9d %7d %7d %5.1f%% %7s %8s"
               % (os.path.relpath(p, corpus)[:36], r["size"], r["functions"],
@@ -193,8 +219,15 @@ def main(argv):
     if tot_c:
         print("byte-verified: %d/%d = %.1f%% of checkable matches"
               % (tot_v, tot_c, 100.0 * tot_v / tot_c))
+    problems = evalutil.validation_problems(
+        processed, errors,
+        tot_v if index is not None else None,
+        tot_c if index is not None else None,
+        args.min_verified, args.allow_empty)
+    for problem in problems:
+        print("VALIDATION FAILED: %s" % problem)
+    return evalutil.exit_status(problems, args.report_only)
 
 
 if __name__ == "__main__":
-    bn.disable_default_log()
-    main(sys.argv[1:])
+    raise SystemExit(main(configure=True))

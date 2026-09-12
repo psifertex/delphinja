@@ -162,6 +162,15 @@ rather than a replacement for them.
 | `tools/bpleval.py` | A package's export names against an independent library |
 | `tools/coalesce.py` | Per-era core and deltas out of the per-release libraries ([COALESCE.md](COALESCE.md)) |
 
+## Validation behavior
+
+`evaluate.py`, `fpceval.py`, and `bpleval.py` are correctness checks as well as
+reports. They return nonzero for input-processing errors, empty evidence, or a
+correctness rate below their configured threshold. This makes them safe to
+call from automation. Each accepts `--report-only` for exploratory measurement
+and `--allow-empty` where an empty filtered selection is intentional; see each
+command's `--help` for its metric-specific threshold.
+
 ## Attribution
 
 Knowledge base data ©crypto2011, MIT licensed. 
