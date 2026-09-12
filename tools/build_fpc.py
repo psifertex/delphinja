@@ -34,10 +34,11 @@ oversized image changes how functions hash).
 """
 
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
-import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -48,6 +49,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
 from tools import bnenv        # noqa: E402  (before any binaryninja import)
+from tools import repro        # noqa: E402
 
 bnenv.scratch_user_directory("/tmp/bn-fpc-build")
 
@@ -66,6 +68,21 @@ INSTALLERS = {
 
 BASE_URL = "https://sourceforge.net/projects/freepascal/files/%s/download"
 
+# Size and MD5 are SourceForge's publisher metadata.  MD5 is not being used as
+# a modern adversarial signature here; paired with the pinned release path and
+# size it prevents truncated/error pages and mutable cache contents from being
+# accepted silently.
+INSTALLER_ARTIFACTS = {
+    ("3.2.2", "i386-win32"): {
+        "size": 53470080, "md5": "c65673506c4044aa7885e4bba37c6153"},
+    ("3.0.4", "i386-win32"): {
+        "size": 40156912, "md5": "2d36851f5a963a050cc4c2b21d55cb25"},
+    ("2.6.4", "i386-win32"): {
+        "size": 42312636, "md5": "973fcb6dc027f020cea1d7c821ee234e"},
+    ("3.2.2", "x86_64-win64"): {
+        "size": 93909874, "md5": "a249cf780e0eed1855960338669f1181"},
+}
+
 PLATFORMS = {"i386-win32": "windows-x86", "x86_64-win64": "windows-x86_64"}
 
 # Which package directories a library covers. Prefixes, matched against the
@@ -74,6 +91,13 @@ PACKAGES = ("rtl",)
 
 TARGETS = [("3.2.2", "i386-win32"), ("3.0.4", "i386-win32"),
            ("2.6.4", "i386-win32"), ("3.2.2", "x86_64-win64")]
+
+
+def source(version, target):
+    member = INSTALLERS[(version, target)]
+    return dict(INSTALLER_ARTIFACTS[(version, target)],
+                provider="SourceForge/freepascal", path=member,
+                version=version, target=target)
 
 
 def log(msg):
@@ -89,32 +113,56 @@ def unit_dirs(tree, target):
             if d.startswith(PACKAGES) and os.path.isdir(os.path.join(base, d))]
 
 
+def unit_inputs(tree, target):
+    """Every extracted file that can feed object staging or case recovery."""
+    paths = []
+    for package in unit_dirs(tree, target):
+        for base, dirs, names in os.walk(package):
+            dirs.sort()
+            paths.extend(os.path.join(base, name) for name in sorted(names)
+                         if name.lower().endswith((".o", ".ppu")))
+    return paths
+
+
 def fetch(version, target, cache):
     """Extract the release's unit tree, downloading the installer if needed."""
     member = INSTALLERS.get((version, target))
     if member is None:
         raise RuntimeError("no installer known for FPC %s %s" % (version, target))
     name = os.path.basename(member)
-    root = os.path.join(cache, name[:-len(".exe")])
+    expected = source(version, target)
+    root = os.path.join(cache, "%s-%s" %
+                        (name[:-len(".exe")], expected["md5"][:12]))
     tree = os.path.join(root, "app")
-    if unit_dirs(tree, target):
+    extracted = repro.read_cache(os.path.join(root, "extract.json"), expected)
+    current = unit_inputs(tree, target)
+    valid_tree = (isinstance(extracted, dict) and current
+                  and repro.inventory_matches(
+                      current, extracted.get("files"), tree))
+    if valid_tree:
         return tree
     archive = os.path.join(cache, name)
-    if not os.path.exists(archive):
+    if not repro.verify_file(archive, expected):
         log("downloading %s" % name)
-        urllib.request.urlretrieve(BASE_URL % member, archive)
-        # SourceForge answers a 502 with an HTML page and curl-like tools save
-        # it happily; an installer that is not a PE is that page.
-        with open(archive, "rb") as fh:
-            if fh.read(2) != b"MZ":
-                os.unlink(archive)
-                raise RuntimeError("%s is not an executable; the download was "
-                                   "probably an error page" % name)
+    repro.fetch_verified(BASE_URL % member, archive, expected)
     log("extracting %s" % name)
-    subprocess.run(["innoextract", "-s", "-d", root, archive],
-                   check=True, capture_output=True)
-    if not unit_dirs(tree, target):
-        raise RuntimeError("no units/%s in the extracted tree" % target)
+    temporary = tempfile.mkdtemp(prefix=".%s." % name, dir=cache)
+    try:
+        subprocess.run(["innoextract", "-s", "-d", temporary, archive],
+                       check=True, capture_output=True)
+        temporary_tree = os.path.join(temporary, "app")
+        if not unit_dirs(temporary_tree, target):
+            raise RuntimeError("no units/%s in the extracted tree" % target)
+        repro.write_cache(
+            os.path.join(temporary, "extract.json"), expected,
+            {"files": repro.file_inventory(
+                unit_inputs(temporary_tree, target), temporary_tree)})
+        if os.path.isdir(root):
+            shutil.rmtree(root)
+        os.replace(temporary, root)
+    finally:
+        if os.path.isdir(temporary):
+            shutil.rmtree(temporary)
     return tree
 
 
@@ -132,17 +180,21 @@ def main(outdir, workdir, only=None):
         if only and version not in only and tag not in only:
             continue
         out = os.path.join(outdir, "fpc-rtl-%s.warp" % tag)
-        if os.path.exists(out):
-            log("%s already built, skipping" % tag)
-            results.append((tag, "skipped", os.path.getsize(out), 0))
-            continue
         t0 = time.time()
         try:
             tree = fetch(version, target, cache)
             roots = unit_dirs(tree, target)
+            source_info = source(version, target)
+            paths = fpcgen.object_files(roots)
+            build = fpcgen.build_identity(paths, PLATFORMS[target], source_info)
+            if repro.artifact_is_current(out, build):
+                log("%s already built from current inputs, skipping" % tag)
+                results.append((tag, "skipped", os.path.getsize(out), 0))
+                continue
             log("%s: %d package directories" % (tag, len(roots)))
             fpcgen.generate(roots, os.path.join(workdir, "build-%s" % tag),
-                            out, platform=PLATFORMS[target], log=log)
+                            out, platform=PLATFORMS[target], log=log,
+                            source=source_info)
             results.append((tag, "built", os.path.getsize(out),
                             time.time() - t0))
         except Exception as exc:                            # noqa: BLE001

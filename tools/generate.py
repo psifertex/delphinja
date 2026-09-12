@@ -14,6 +14,7 @@ seconds, so decisions about which procedures deserve signatures stay reversible.
 """
 
 import os
+import sys
 import time
 
 import binaryninja as bn
@@ -24,6 +25,7 @@ from . import kb as kbmod
 from . import naming
 from . import stage
 from . import delphitypes as dtypes
+from . import repro
 
 SELECTED_TAG = "WARP: Selected Function"
 
@@ -32,6 +34,25 @@ SELECTED_TAG = "WARP: Selected Function"
 # is effectively all of midas.dll in a single procedure and which Binary Ninja
 # then analyses as a body spanning 1.6 MB.
 MAX_DUMP = 0x10000
+
+TOOL_FILES = (__file__, dclasses.__file__, kbmod.__file__, naming.__file__,
+              stage.__file__, dtypes.__file__)
+
+
+def build_identity(kbpath, modules=None, source=None):
+    """Everything that can affect an IDR-derived analysed image/library."""
+    inputs = {"knowledge_base": repro.file_inventory([kbpath])}
+    if source is not None:
+        inputs["source"] = source
+    return repro.build_manifest(
+        "delphi-idr-warp", inputs,
+        {"architecture": "x86", "max_dump": MAX_DUMP,
+         "modules": sorted(modules) if modules is not None else None,
+         "platform": "windows-x86", "selected_tag": SELECTED_TAG},
+        repro.file_inventory(TOOL_FILES,
+                             os.path.dirname(os.path.abspath(__file__))),
+        {"binary_ninja": bn.core_version(),
+         "python": "%d.%d.%d" % sys.version_info[:3]})
 
 
 def display_units(kb):
@@ -58,11 +79,21 @@ def build_view(kbpath, imgpath, modules=None, log=print):
         "loader.architecture": "x86",
         "loader.platform": "windows-x86",
         "loader.imageBase": stage.BASE})
+    if bv is None:
+        raise RuntimeError("Binary Ninja could not open %s" % imgpath)
+    try:
+        return _configure_view(bv, kb, units, layout, log, t)
+    except BaseException:
+        bv.file.close()
+        raise
+
+
+def _configure_view(bv, kb, units, layout, log, started):
     for addr, _ in layout.procs:
         bv.create_user_function(addr)
     bv.update_analysis_and_wait()
     log("analysed %d functions (%.1f min)"
-        % (len(list(bv.functions)), (time.time() - t) / 60))
+        % (len(list(bv.functions)), (time.time() - started) / 60))
 
     try:
         bv.create_tag_type(SELECTED_TAG, "\u2713")
@@ -148,25 +179,47 @@ def select_contributed(bv, log=print):
     return selected
 
 
-def generate(kbpath, workdir, outfile, modules=None, save_db=True, log=print):
+def generate(kbpath, workdir, outfile, modules=None, save_db=True, log=print,
+             source=None):
     os.makedirs(workdir, exist_ok=True)
     img = os.path.join(workdir, "image.bin")
     dbf = os.path.join(workdir, "image.bndb")
+    stampf = os.path.join(workdir, "stamp.json")
     t0 = time.time()
 
-    if save_db and os.path.exists(dbf):
+    build = build_identity(kbpath, modules, source)
+    cached = repro.read_cache(stampf, build) if save_db else None
+    database = cached.get("database") if isinstance(cached, dict) else None
+
+    if database and repro.verify_file(dbf, database):
         log("reusing analysed database %s" % dbf)
         bv = bn.load(dbf, update_analysis=False)
-        # The database was named before the contribution filter existed, so
-        # apply it here too. Sizes come from the analysed functions themselves,
-        # which is the same measure the matcher uses.
-        select_contributed(bv, log)
+        rebuilt = False
+        if bv is None:
+            raise RuntimeError("Binary Ninja could not open %s" % dbf)
     else:
+        if os.path.exists(dbf) or os.path.exists(stampf):
+            log("cached database is stale or corrupt, rebuilding")
         bv, _ = build_view(kbpath, img, modules, log)
-        if save_db:
+        rebuilt = True
+    try:
+        if not rebuilt:
+            # Older databases predate the contribution filter, so apply it on
+            # every reuse before handing the view to WARP.
+            select_contributed(bv, log)
+        if rebuilt and save_db:
             bv.create_database(dbf)
+            repro.write_cache(
+                stampf, build,
+                {"database": {"size": os.path.getsize(dbf),
+                              "sha256": repro.file_hash(dbf)}})
             log("saved %s" % dbf)
+        return _write_warp(bv, outfile, build, t0, log)
+    finally:
+        bv.file.close()
 
+
+def _write_warp(bv, outfile, build, started, log):
     t = time.time()
     proc = warp.WarpProcessor(
         included_functions=warp.warp_enums.WARPProcessorIncludedFunctions
@@ -175,8 +228,12 @@ def generate(kbpath, workdir, outfile, modules=None, save_db=True, log=print):
     wf = proc.start()
     if wf is None:
         raise RuntimeError("WARP processor produced nothing")
-    open(outfile, "wb").write(bytes(wf.to_data_buffer()))
+    with repro.atomic_path(outfile) as temporary:
+        with open(temporary, "wb") as fh:
+            fh.write(bytes(wf.to_data_buffer()))
+    repro.write_artifact_manifest(outfile, build)
     log("wrote %s: %d functions, %d bytes (warp %.1fs, total %.1f min)"
         % (outfile, sum(len(c.functions) for c in wf.chunks),
-           os.path.getsize(outfile), time.time() - t, (time.time() - t0) / 60))
+           os.path.getsize(outfile), time.time() - t,
+           (time.time() - started) / 60))
     return outfile

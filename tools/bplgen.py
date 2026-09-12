@@ -34,6 +34,7 @@ this one can carry types as well as names.
 """
 
 import os
+import sys
 import time
 
 import binaryninja as bn
@@ -41,12 +42,28 @@ from binaryninja import Symbol, SymbolType, warp
 
 from . import bplkb
 from . import stage
+from . import repro
 
 SELECTED_TAG = "WARP: Selected Function"
 
 #: Same ceiling as `generate.py`: past this a "function" is a data blob that
 #: analysis walked into, and no signature wants it.
 MAX_DUMP = 0x10000
+
+
+def build_identity(paths, shipped, prototypes):
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return repro.build_manifest(
+        "delphi-bpl-warp",
+        {"packages": repro.file_inventory(paths),
+         "excluded_libraries": repro.file_inventory(shipped)},
+        {"analysis.debugInfo.internal": False, "max_dump": MAX_DUMP,
+         "prototypes": bool(prototypes), "selected_tag": SELECTED_TAG},
+        repro.file_inventory(
+            (__file__, bplkb.__file__, stage.__file__,
+             os.path.join(root, "demangler.py")), root),
+        {"binary_ninja": bn.core_version(),
+         "python": "%d.%d.%d" % sys.version_info[:3]})
 
 
 def log(message):
@@ -97,6 +114,16 @@ def candidates(path, log=log):
     claims = bplkb.readings(path)
     bv = bn.load(path, update_analysis=True,
                  options={"analysis.debugInfo.internal": False})
+    if bv is None:
+        raise RuntimeError("Binary Ninja could not open %s" % path)
+    try:
+        return _candidates_view(path, bv, claims, started, log)
+    except BaseException:
+        bv.file.close()
+        raise
+
+
+def _candidates_view(path, bv, claims, started, log):
     bv.update_analysis_and_wait()
 
     rows = []
@@ -212,46 +239,51 @@ def apply(path, bv, rows, keep, demangler, log=log):
 def generate(paths, outfile, shipped=(), prototypes=True, log=log):
     """Build `outfile` from every package in `paths`."""
     started = time.time()
+    paths = sorted(paths)
+    shipped = sorted(shipped)
+    build = build_identity(paths, shipped, prototypes)
     claimed = shipped_guids(shipped, log) if shipped else {}
     analysed = []
-    for path in paths:
-        bv, rows = candidates(path, log)
-        analysed.append((path, rows, bv))
-    kept, by_guid, overlap = select([(p, r) for p, r, _ in analysed],
-                                    claimed, log)
+    try:
+        for path in paths:
+            bv, rows = candidates(path, log)
+            analysed.append((path, rows, bv))
+        kept, by_guid, overlap = select([(p, r) for p, r, _ in analysed],
+                                        claimed, log)
 
-    if claimed:
-        # The same independent check RTTI.md reports, and for the same reason:
-        # the overlap is dropped either way, so its agreement rate is a free
-        # measurement of whether the rest of the naming is sound.  These names
-        # come from a package's export table and the shipped ones from
-        # Delphi's `.dcu` files by way of IDR -- two unrelated inputs.
-        agree = sum(1 for g in overlap
-                    if {n.lower() for n in claimed[g]}
-                    & {n.lower() for n in by_guid[g]})
-        log("independent check: of %d GUIDs a shipped library also carries, "
-            "%d (%.1f%%) carry the identical name"
-            % (len(overlap), agree, 100.0 * agree / max(len(overlap), 1)))
+        if claimed:
+            # The same independent check RTTI.md reports, and for the same
+            # reason: the overlap is dropped either way, so its agreement rate
+            # is a free measurement of whether the rest of the naming is sound.
+            agree = sum(1 for g in overlap
+                        if {n.lower() for n in claimed[g]}
+                        & {n.lower() for n in by_guid[g]})
+            log("independent check: of %d GUIDs a shipped library also carries, "
+                "%d (%.1f%%) carry the identical name"
+                % (len(overlap), agree,
+                   100.0 * agree / max(len(overlap), 1)))
 
-    demangler = _Typer() if prototypes else None
-    processor = warp.WarpProcessor(
-        included_functions=warp.warp_enums.WARPProcessorIncludedFunctions
-        .WARPProcessorIncludedFunctionsSelected)
-    # The views stay alive until start() returns: the processor reads them
-    # then, not when they are added.
-    views = []
-    total = 0
-    for path, rows, bv in analysed:
-        named, _ = apply(path, bv, rows, kept, demangler, log)
-        total += named
-        processor.add_binary_view(bv)
-        views.append(bv)
+        demangler = _Typer() if prototypes else None
+        processor = warp.WarpProcessor(
+            included_functions=warp.warp_enums.WARPProcessorIncludedFunctions
+            .WARPProcessorIncludedFunctionsSelected)
+        total = 0
+        for path, rows, bv in analysed:
+            named, _ = apply(path, bv, rows, kept, demangler, log)
+            total += named
+            processor.add_binary_view(bv)
 
-    warp_file = processor.start()
-    if warp_file is None:
-        raise RuntimeError("WARP processor produced nothing")
-    open(outfile, "wb").write(bytes(warp_file.to_data_buffer()))
-    log("wrote %s: %d functions, %d bytes (%.1f min)"
-        % (outfile, sum(len(c.functions) for c in warp_file.chunks),
-           os.path.getsize(outfile), (time.time() - started) / 60))
-    return outfile, total
+        warp_file = processor.start()
+        if warp_file is None:
+            raise RuntimeError("WARP processor produced nothing")
+        with repro.atomic_path(outfile) as temporary:
+            with open(temporary, "wb") as handle:
+                handle.write(bytes(warp_file.to_data_buffer()))
+        repro.write_artifact_manifest(outfile, build)
+        log("wrote %s: %d functions, %d bytes (%.1f min)"
+            % (outfile, sum(len(c.functions) for c in warp_file.chunks),
+               os.path.getsize(outfile), (time.time() - started) / 60))
+        return outfile, total
+    finally:
+        for _, _, view in analysed:
+            view.file.close()

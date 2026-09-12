@@ -220,7 +220,10 @@ def cover(keep, limit=None):
         for key, places in remaining.items():
             for path, addr in places:
                 offers[path].setdefault(key, addr)
-        path, take = max(offers.items(), key=lambda kv: len(kv[1]))
+        # Stable path order breaks equal-coverage ties.  Depending on dict
+        # insertion here changes which binaries feed WARP and therefore makes
+        # an otherwise identical rebuild choose different inputs.
+        path, take = min(offers.items(), key=lambda kv: (-len(kv[1]), kv[0]))
         if not take:
             break
         chosen.append((path, take))

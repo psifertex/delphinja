@@ -176,6 +176,18 @@ run against the staged image and remove functions from it.
 it with the licence and enterprise URL, so an unattended run neither writes to
 the real configuration nor dies on the first analysis.
 
+Downloads are accepted only when their byte count and publisher-provided MD5
+match SourceForge's release metadata. The checksum is retained for provenance
+and cache-integrity checking (not presented as a modern cryptographic
+signature), while HTTPS and the exact versioned release path identify the
+publisher source. Downloads are written to a same-directory temporary file and
+atomically replace the cache only after verification. The analysed database
+stamp hashes every `.o`, every available companion `.ppu`, all relevant tool
+modules, build settings, and the Binary Ninja/Python runtime; basename and file
+size alone are never used as cache identity. The extracted unit cache carries
+the same per-file inventory and is re-extracted from the verified installer if
+any contributing `.o` or `.ppu` is added, removed, or changed.
+
 ## Modules
 
 | File | Contents |
@@ -188,6 +200,7 @@ the real configuration nor dies on the first analysis.
 | `tools/build_fpc.py` | Fetches releases and builds every target |
 | `tools/fpceval.py` | Corpus evaluation with byte-level verification |
 | `tools/bnenv.py` | Scratch Binary Ninja user directory (shared with `build_all.py`) |
+| `tools/repro.py` | Verified downloads, atomic replacement, content stamps and manifests |
 
 ## Version coverage
 

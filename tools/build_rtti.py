@@ -25,7 +25,6 @@ which imports the decoder deliberately and says so.
 
 import argparse
 import glob
-import json
 import os
 import re
 import sys
@@ -37,6 +36,7 @@ bnenv.scratch_user_directory()
 
 from tools import rttikb                                       # noqa: E402
 from tools import rttigen                                      # noqa: E402
+from tools import repro                                        # noqa: E402
 from tools.rttigen import log                                  # noqa: E402
 
 # The compiler stamps this into binaries built by XE2 and later, and the
@@ -125,9 +125,10 @@ def main():
     # Every already-published Delphi library, not just this era's: with no
     # layout to go on `signatures.delphi_tags` registers all of them, so any of
     # them can be loaded beside this one.
-    shipped = rttigen.shipped_guids(
-        sorted(p for p in glob.glob(os.path.join(SIGNATURES, "delphi-rtl-*.warp"))
-               if os.path.abspath(p) != os.path.abspath(args.out)))
+    shipped_paths = sorted(
+        p for p in glob.glob(os.path.join(SIGNATURES, "delphi-rtl-*.warp"))
+        if os.path.abspath(p) != os.path.abspath(args.out))
+    shipped = rttigen.shipped_guids(shipped_paths)
     log("%d GUIDs already claimed by the shipped libraries" % len(shipped))
 
     consensus = rttikb.Consensus(args.votes, args.blocks)
@@ -141,11 +142,27 @@ def main():
     if not keep:
         raise SystemExit("no reading survived the consensus")
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    _, totals = rttigen.generate(keep, args.out, args.views)
-    json.dump({"report": report, "totals": totals,
-               "versions": {os.path.basename(r["file"]):
-                            compiler_version(r["file"]) for r in useful}},
-              open(os.path.join(args.workdir, "build.json"), "w"), indent=2)
+    provenance = {
+        "candidates": repro.file_inventory(paths,
+                                             os.path.abspath(args.corpus)),
+        "consensus": {"blocks": args.blocks, "votes": args.votes},
+        "held_out": sorted(repro.logical_path(r["file"],
+                                               os.path.abspath(args.corpus))
+                           for r in held),
+        "harvest_tools": repro.file_inventory(rttigen.HARVEST_TOOLS,
+                                               rttigen.ROOT),
+        "shipped_libraries": repro.file_inventory(shipped_paths, SIGNATURES),
+    }
+    _, totals = rttigen.generate(keep, args.out, args.views,
+                                 provenance=provenance)
+    repro.atomic_json(
+        os.path.join(args.workdir, "build.json"),
+        {"output_manifest": repro.manifest_path(os.path.abspath(args.out)),
+         "report": report, "totals": totals,
+         "versions": [{"file": repro.logical_path(
+                           r["file"], os.path.abspath(args.corpus)),
+                       "compiler": compiler_version(r["file"])}
+                      for r in sorted(useful, key=lambda record: record["file"])]})
 
 
 if __name__ == "__main__":

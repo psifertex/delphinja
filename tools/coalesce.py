@@ -136,7 +136,14 @@ Nothing is written outside `<outdir>`.
 import collections
 import os
 import re
+import shutil
 import sys
+
+if __package__:
+    from . import repro
+else:
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from tools import repro
 
 #: The library sets `integration.signatures.DELPHI_ERAS` loads together, named
 #: by the era rather than by the VMT slot count so the output file names read.
@@ -449,10 +456,11 @@ def build(sigdir, outdir, keep_all_spellings=False, every_source=False,
         names.setdefault(name, set()).update(sources)
     if not os.path.isdir(outdir):
         os.makedirs(outdir)
-    with open(os.path.join(outdir, "plan.tsv"), "w") as fh:
-        for era, guid, dest, name, sources in sorted(assignments):
-            fh.write("%s\t%s\t%s\t%s\t%s\n"
-                     % (era, guid, dest, name, ",".join(sources)))
+    with repro.atomic_path(os.path.join(outdir, "plan.tsv")) as temporary:
+        with open(temporary, "w") as fh:
+            for era, guid, dest, name, sources in sorted(assignments):
+                fh.write("%s\t%s\t%s\t%s\t%s\n"
+                         % (era, guid, dest, name, ",".join(sources)))
 
     # One pass per library, keeping only the WarpFunction objects some
     # destination wants.  A function is picked up by the era it belongs to, by
@@ -537,6 +545,7 @@ def compress(path, outdir, log=print):
     directory, and everything under it lands in one output, which is exactly
     what must not happen to libraries that were just separated.
     """
+    import binaryninja as bn
     from binaryninja import warp
     solo = os.path.join(outdir, "raw", "_one")
     if not os.path.isdir(solo):
@@ -544,15 +553,24 @@ def compress(path, outdir, log=print):
     for stale in os.listdir(solo):
         os.remove(os.path.join(solo, stale))
     staged = os.path.join(solo, os.path.basename(path))
-    os.rename(path, staged)
+    shutil.copyfile(path, staged)
     processor = warp.WarpProcessor()
     processor.add_path(solo)
     warp_file = processor.start()
     if warp_file is None:
         raise RuntimeError("processor produced nothing for %s" % path)
     out = os.path.join(outdir, os.path.basename(path))
-    open(out, "wb").write(bytes(warp_file.to_data_buffer()))
-    os.rename(staged, path)
+    build = repro.build_manifest(
+        "coalesced-delphi-warp",
+        {"raw_library": repro.file_inventory([path]),
+         "plan": repro.file_inventory([os.path.join(outdir, "plan.tsv")])},
+        {"eras": list(ERAS.items()), "folded_policy": FOLDED_POLICY},
+        repro.file_inventory([__file__], os.path.dirname(__file__)),
+        {"binary_ninja": bn.core_version()})
+    with repro.atomic_path(out) as temporary:
+        with open(temporary, "wb") as handle:
+            handle.write(bytes(warp_file.to_data_buffer()))
+    repro.write_artifact_manifest(out, build)
     log("wrote  %-24s %7d functions %9d bytes (%.1fx)"
         % (os.path.basename(out),
            sum(len(c.functions) for c in warp_file.chunks),
@@ -627,6 +645,9 @@ def verify(outdir, log=print):
 
 
 def main(argv):
+    if "--help" in argv or "-h" in argv:
+        print(__doc__)
+        return 0
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     args = [a for a in argv[1:] if not a.startswith("--")]
     outdir = args[0] if args else os.path.join(root, "signatures-new")
@@ -647,6 +668,9 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    import binaryninja as bn
-    bn.disable_default_log()
-    main(sys.argv)
+    if "--help" in sys.argv or "-h" in sys.argv:
+        main(sys.argv)
+    else:
+        import binaryninja as bn
+        bn.disable_default_log()
+        main(sys.argv)

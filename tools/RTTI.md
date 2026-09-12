@@ -193,7 +193,17 @@ anything here and not diagnosed.
 
 The harvest caches one JSON per binary under `workdir/kb`, so changing the
 consensus rules and rebuilding costs seconds rather than the hour the harvest
-takes. `--hold-out` is how the precision figure above is produced.
+takes. Its key covers the binary's path relative to the corpus, its full
+content hash, the decoder/harvester code, analysis options, and Binary Ninja
+runtime. Thus two projects with the same executable basename cannot collide,
+and changed binaries or tools cannot reuse stale readings. Cache JSON is
+written atomically and malformed or mismatched records are rebuilt.
+`--hold-out` is how the precision figure above is produced.
+
+The generated library has a canonical `.manifest.json` sidecar recording the
+corpus and shipped-library hashes, consensus and view settings, exact kept
+reading-set digest, selected source binaries, tool hashes, runtime, and output
+digest.
 
 ## Modules
 

@@ -25,16 +25,60 @@ goes into the library is code as a real program links it, which is the shape
 the library will meet.
 """
 
-import json
 import os
+import sys
 import time
 
 import binaryninja as bn
 from binaryninja import Symbol, SymbolType, warp
 
 from . import rttikb
+from . import repro
 
 SELECTED_TAG = "WARP: Selected Function"
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HARVEST_TOOLS = (
+    __file__, rttikb.__file__,
+    os.path.join(ROOT, "rtti", "apply.py"),
+    os.path.join(ROOT, "rtti", "parser.py"),
+    os.path.join(ROOT, "rtti", "messages.py"),
+    os.path.join(ROOT, "demangler.py"),
+)
+
+
+def harvest_identity(path, source_base=None):
+    """Key a reading by path, bytes, decoder code, options, and BN core."""
+    source_base = source_base or os.path.dirname(os.path.abspath(path))
+    return repro.content_cache_manifest(
+        "delphi-rtti-harvest", path, source_base, HARVEST_TOOLS, ROOT,
+        {"analysis.debugInfo.internal": False},
+        {"binary_ninja": bn.core_version(),
+         "python": "%d.%d.%d" % sys.version_info[:3]})
+
+
+def generation_identity(keep, chosen, limit, provenance=None):
+    source_paths = [path for places in keep.values() for path, _ in places]
+    source_base = repro.common_base(source_paths)
+    readings = []
+    for (name, guid), places in sorted(keep.items()):
+        readings.append({"guid": guid, "name": name,
+                         "places": [[repro.logical_path(path, source_base), addr]
+                                    for path, addr in sorted(places)]})
+    inputs = {
+        "binaries": repro.file_inventory([path for path, _ in chosen]),
+        "readings_sha256": repro.manifest_stamp(readings),
+    }
+    if provenance is not None:
+        inputs["provenance"] = provenance
+    return repro.build_manifest(
+        "delphi-rtti-warp", inputs,
+        {"analysis.debugInfo.internal": False, "view_limit": limit,
+         "selected_tag": SELECTED_TAG},
+        repro.file_inventory((__file__, rttikb.__file__),
+                             os.path.dirname(__file__)),
+        {"binary_ninja": bn.core_version(),
+         "python": "%d.%d.%d" % sys.version_info[:3]})
 
 
 def log(message):
@@ -67,6 +111,15 @@ def harvest(path):
     started = time.time()
     bv = bn.load(path, update_analysis=True,
                  options={"analysis.debugInfo.internal": False})
+    if bv is None:
+        raise RuntimeError("Binary Ninja could not open %s" % path)
+    try:
+        return _harvest_view(path, bv, started)
+    finally:
+        bv.file.close()
+
+
+def _harvest_view(path, bv, started):
     bv.update_analysis_and_wait()
     md = _metadata(bv).scan()
 
@@ -83,7 +136,7 @@ def harvest(path):
     # A method array entry is proof of an entry point whether or not analysis
     # reached it, and an address with no function has no GUID to record.
     created = 0
-    for addr in claims:
+    for addr in sorted(claims):
         if bv.is_valid_offset(addr) and bv.get_function_at(addr) is None:
             if bv.create_user_function(addr) is not None:
                 created += 1
@@ -91,7 +144,7 @@ def harvest(path):
         bv.update_analysis_and_wait()
 
     entries = []
-    for addr, claim in claims.items():
+    for addr, claim in sorted(claims.items()):
         func = bv.get_function_at(addr)
         if func is None:
             continue
@@ -102,7 +155,7 @@ def harvest(path):
         entries.append(dict(
             addr=addr, guid=guid, blocks=len(list(func.basic_blocks)),
             size=max(r.end for r in func.address_ranges) - func.start,
-            claims=claim))
+            claims=sorted(claim)))
     return dict(file=path, functions=len(list(bv.functions)),
                 claimed=len(claims), created=created, entries=entries,
                 n_virtuals=getattr(getattr(md, "layout", None), "n_virtuals", None),
@@ -117,15 +170,20 @@ def harvest_corpus(paths, cachedir, log=log):
     """
     os.makedirs(cachedir, exist_ok=True)
     records = []
+    paths = sorted(paths)
+    source_base = repro.common_base(paths)
     for path in paths:
-        key = "%s_%s.json" % (os.path.basename(os.path.dirname(path)),
-                              os.path.basename(path))
-        dst = os.path.join(cachedir, key)
-        if os.path.exists(dst):
-            records.append(json.load(open(dst)))
+        build = harvest_identity(path, source_base)
+        dst = repro.cache_path(cachedir, path, build)
+        record = repro.read_cache(dst, build)
+        if record is not None:
+            # The cache identity is deliberately checkout-portable, while the
+            # consumer needs the current location to reopen the binary.
+            record["file"] = path
+            records.append(record)
             continue
         record = harvest(path)
-        json.dump(record, open(dst, "w"))
+        repro.write_cache(dst, build, record)
         log("%-42s functions=%-6d named=%-5d %.0fs"
             % (os.path.basename(path), record["functions"],
                len(record["entries"]), record["seconds"]))
@@ -167,6 +225,16 @@ def contribute(path, wanted, log=log):
     """
     bv = bn.load(path, update_analysis=True,
                  options={"analysis.debugInfo.internal": False})
+    if bv is None:
+        raise RuntimeError("Binary Ninja could not open %s" % path)
+    try:
+        return _contribute_view(path, bv, wanted, log)
+    except BaseException:
+        bv.file.close()
+        raise
+
+
+def _contribute_view(path, bv, wanted, log):
     bv.update_analysis_and_wait()
     created = 0
     for _, addr in wanted.items():
@@ -194,9 +262,11 @@ def contribute(path, wanted, log=log):
     return bv, dict(tagged=tagged, drifted=drifted, missing=missing)
 
 
-def generate(keep, outfile, limit=None, log=log):
+def generate(keep, outfile, limit=None, log=log, provenance=None):
     """Build `outfile` from the binaries that between them hold `keep`."""
     chosen, remaining = rttikb.cover(keep, limit)
+    build = generation_identity(
+        keep, [(path, wanted) for path, wanted in chosen], limit, provenance)
     log("cover: %d binaries hold %d of %d readings"
         % (len(chosen), len(keep) - len(remaining), len(keep)))
     processor = warp.WarpProcessor(
@@ -205,19 +275,26 @@ def generate(keep, outfile, limit=None, log=log):
     # The views are kept alive until start() returns: the processor reads them
     # then, not when they are added.
     views = []
-    totals = dict(tagged=0, drifted=0, missing=0)
-    for path, wanted in chosen:
-        bv, stats = contribute(path, wanted, log)
-        for k in totals:
-            totals[k] += stats[k]
-        processor.add_binary_view(bv)
-        views.append(bv)
-    started = time.time()
-    warp_file = processor.start()
-    if warp_file is None:
-        raise RuntimeError("WARP processor produced nothing")
-    open(outfile, "wb").write(bytes(warp_file.to_data_buffer()))
-    log("wrote %s: %d functions, %d bytes (%.0fs)"
-        % (outfile, sum(len(c.functions) for c in warp_file.chunks),
-           os.path.getsize(outfile), time.time() - started))
-    return outfile, totals
+    try:
+        totals = dict(tagged=0, drifted=0, missing=0)
+        for path, wanted in chosen:
+            bv, stats = contribute(path, wanted, log)
+            views.append(bv)
+            for k in totals:
+                totals[k] += stats[k]
+            processor.add_binary_view(bv)
+        started = time.time()
+        warp_file = processor.start()
+        if warp_file is None:
+            raise RuntimeError("WARP processor produced nothing")
+        with repro.atomic_path(outfile) as temporary:
+            with open(temporary, "wb") as handle:
+                handle.write(bytes(warp_file.to_data_buffer()))
+        repro.write_artifact_manifest(outfile, build)
+        log("wrote %s: %d functions, %d bytes (%.0fs)"
+            % (outfile, sum(len(c.functions) for c in warp_file.chunks),
+               os.path.getsize(outfile), time.time() - started))
+        return outfile, totals
+    finally:
+        for view in views:
+            view.file.close()

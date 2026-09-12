@@ -2,9 +2,9 @@
 #
 # Copy this file into your own plugin repository as .github/workflows/release.yml
 # and it works unmodified, as long as plugin.json is at the repository root. All
-# of the actual work lives in Vector35/plugin_actions, so fixes to the release
-# machinery reach you by moving the @v1 tag rather than by you re-copying this
-# file.
+# of the actual work lives in Vector35/plugin_actions. The action is pinned to
+# an audited commit so a mutable tag cannot change a release underneath you;
+# update the commit deliberately when adopting action changes.
 #
 # How to use it
 # -------------
@@ -61,7 +61,7 @@ jobs:
       # the checkout parameters are load-bearing (the default branch, with full
       # history and every tag). Set checkout: false if you need your own.
       - name: Release
-        uses: Vector35/plugin_actions@v1
+        uses: Vector35/plugin_actions@9ea98e06c5aa58a8e2d973c91af583beaecb0efd # v1
         with:
           version: ${{ inputs.version }}
           description: ${{ inputs.description }}

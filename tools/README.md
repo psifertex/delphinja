@@ -13,6 +13,11 @@ holds per-procedure name, code bytes and a per-byte relocation mask, harvested
 from the shipped `.dcu` files — the exact bytes the linker copies into an
 executable. No Delphi installation is required.
 
+`build_all.py` fetches those files from the immutable IDR commit
+`03f38fc0b2e5b972c644e0c80a24872c447aa5b7`, and checks each download against
+the size and Git blob ID published by GitHub for that commit. A partial,
+changed, or error response never replaces the cached archive.
+
 ## How it works
 
 A knowledge-base procedure is a standalone code dump with **no address**; its
@@ -81,6 +86,13 @@ adds the repository's parent and imports `delphinja.rtti`.
 Note that WARP reads a container's sources when the container is created, so a
 library written by a running process is not visible to it -- generate and test
 in separate processes.
+
+Every builder writes `<output>.manifest.json` beside its `.warp`. The canonical
+manifest records content hashes for source artifacts and tool modules, all
+build-affecting settings, and the Binary Ninja/Python versions where relevant;
+it also authenticates the output itself. Analysed `.bndb` caches have equivalent
+stamps and are reused only when both the identity and database checksum match.
+Missing legacy stamps are intentionally treated as stale.
 
 ## Free Pascal
 
@@ -153,6 +165,7 @@ rather than a replacement for them.
 | `tools/evaluate.py` | Corpus evaluation and precision measurement |
 | `tools/run.py` | CLI for a single knowledge base |
 | `tools/bnenv.py` | Scratch Binary Ninja user directory for batch runs |
+| `tools/repro.py` | Hash verification, atomic replacement, cache stamps and build manifests |
 | `tools/rttikb.py` | Extended-RTTI consensus: naming, voting, set cover ([RTTI.md](RTTI.md)) |
 | `tools/rttigen.py` | Extended-RTTI harvest and `.warp` generation |
 | `tools/build_rtti.py` | Builds `delphi-rtl-xe2plus` from the corpus |
