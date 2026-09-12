@@ -54,6 +54,28 @@ Further reading:
 - [docs/DFM.md](docs/DFM.md) -- the compiled form stream format, and how event
   handlers are bound to the controls that raise them.
 
+## Tests
+
+Run the unit and headless integration tests with:
+
+    python3 tests/run.py
+
+The runner creates a new private `BN_USER_DIRECTORY`, copies only
+`license.dat` and the enterprise server URL from the real Binary Ninja
+profile, and symlinks this checkout into its otherwise empty `plugins`
+directory. Tests run in a child process using Binary Ninja's bundled Python;
+the entire profile is removed after that process exits. Settings changed by a
+test therefore cannot affect the interactive profile.
+
+Use `--pattern 'test_parser.py'` to run one test module, or repeat
+`--setting KEY=JSON` to change settings in the disposable profile for a test
+run.
+
+On macOS the runner prefers the development application. Set `BN_TEST_APP`
+to test another application bundle. On any platform, `BN_TEST_PYTHON` selects
+an interpreter explicitly; `BN_TEST_PYTHONPATH` and `BN_TEST_PYTHONHOME` can
+supply the matching Binary Ninja package and bundled standard library.
+
 ## How it runs
 
 The plugin registers three things:
@@ -170,4 +192,3 @@ table is visible and reversible. Edit the table freely.
 | `integration/workflow.py` | The two module-workflow activities |
 | `integration/signatures.py` | Registers the bundled `.warp` libraries into WARP's container cache |
 | `__init__.py` | Settings, commands and registration |
-
