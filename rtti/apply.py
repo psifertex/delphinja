@@ -3,6 +3,7 @@
 import bisect
 import json
 import re
+from collections import OrderedDict
 
 import binaryninja as bn
 from binaryninja import (BinaryView, Symbol, SymbolType, Type,
@@ -86,25 +87,24 @@ def sanitize(name, fallback="anon"):
 class DelphiMetadata(object):
     """Scan results plus everything derived from them."""
 
+    # Keep enough adjacent blocks hot for the scanners and the records they
+    # immediately parse, without retaining a second copy of every executable
+    # section for the lifetime of the metadata object.
+    READ_CHUNK = 0x10000
+    READ_CACHE_CHUNKS = 8
+
     def __init__(self, bv):
         self.bv = bv
         self._code_ranges = [
             (s.start, s.end) for s in bv.sections.values()
             if s.semantics in (bn.SectionSemantics.ReadOnlyCodeSectionSemantics,
                                bn.SectionSemantics.DefaultSectionSemantics)]
-        # Scanning tests one dword per byte of code, so going through
-        # bv.read() means a third of a million calls into the core, each
-        # taking the view lock while this thread holds the GIL. Analysis is
-        # running on other threads at the same time, so that serialises the
-        # whole pipeline. Copy the code sections out once and scan memory.
-        self._cache = []
-        for start, end in self._code_ranges:
-            try:
-                data = bv.read(start, end - start)
-            except Exception:
-                data = b""
-            if len(data) == end - start:
-                self._cache.append((start, end, data))
+        # Scanner blocks are cached lazily.  Eagerly copying complete code
+        # sections made even the workflow eligibility probe retain an
+        # image-sized duplicate, although that probe reads only a bounded
+        # prefix.  An LRU keeps the hot scanner block and nearby record reads
+        # fast while placing a fixed ceiling on retained bytes.
+        self._cache = OrderedDict()
         self.reader = P.Reader(
             self._read,
             lambda a: a is not None and bv.is_valid_offset(a),
@@ -131,11 +131,43 @@ class DelphiMetadata(object):
         self._class_ti = None
 
     def _read(self, addr, length):
-        for start, end, data in self._cache:
-            if start <= addr and addr + length <= end:
-                off = addr - start
-                return data[off:off + length]
-        return self.bv.read(addr, length)
+        if length <= 0:
+            return b""
+        containing = next(((start, end) for start, end in self._code_ranges
+                           if start <= addr and addr + length <= end), None)
+        out = bytearray()
+        pos = addr
+        stop = addr + length
+        while pos < stop:
+            if containing is None:
+                want = min(self.READ_CHUNK, stop - pos)
+                try:
+                    data = self.bv.read(pos, want)
+                except Exception:
+                    data = b""
+            else:
+                section_start, section_end = containing
+                index = (pos - section_start) // self.READ_CHUNK
+                base = section_start + index * self.READ_CHUNK
+                key = (section_start, index)
+                data = self._cache.pop(key, None)
+                if data is None:
+                    want = min(self.READ_CHUNK, section_end - base)
+                    try:
+                        data = self.bv.read(base, want)
+                    except Exception:
+                        data = b""
+                self._cache[key] = data
+                while len(self._cache) > self.READ_CACHE_CHUNKS:
+                    self._cache.popitem(last=False)
+                offset = pos - base
+                want = min(stop - pos, len(data) - offset)
+                data = data[offset:offset + max(0, want)]
+            out += data
+            pos += len(data)
+            if not data or len(data) < want:
+                break
+        return bytes(out)
 
     def _is_code(self, addr):
         return any(s <= addr < e for s, e in self._code_ranges)
@@ -385,10 +417,11 @@ def _overlaps(index, lo, hi):
 
 
 def undefine_functions(bv, ranges, log=None):
-    """Remove every function that overlaps any of `ranges`.
+    """Remove every automatic function that overlaps any of `ranges`.
 
     Linear sweep happily disassembles RTTI, so these tables usually carry a
     handful of large bogus functions that poison xrefs and the call graph.
+    User-created functions are explicit analyst state and are left alone.
     """
     # Testing every function against every span is quadratic, and a binary
     # with 23,000 functions over 6,000 metadata spans spends more time here
@@ -403,16 +436,16 @@ def undefine_functions(bv, ranges, log=None):
             covered = [(r.start, r.end) for r in f.address_ranges]
         except Exception:
             covered = [(b.start, b.end) for b in f.basic_blocks]
-        if any(_overlaps(index, lo, hi) for lo, hi in covered):
+        # A user function is an explicit assertion and is never ours to
+        # discard.  The workflow cleanup exists only to undo linear sweep's
+        # automatically discovered functions over metadata.
+        if f.auto and any(_overlaps(index, lo, hi) for lo, hi in covered):
             victims.append(f)
     for f in victims:
         if log:
             log("undefining %s at 0x%x (%d blocks)"
                 % (f.name, f.start, len(f.basic_blocks)))
-        if f.auto:
-            bv.remove_function(f)
-        else:
-            bv.remove_user_function(f)
+        bv.remove_function(f)
     return victims
 
 
@@ -1014,8 +1047,8 @@ class Applier(object):
 
     def _comment(self, addr, text):
         if self.opt["comments"] and text and self.sink.supports_comments:
-            self.sink.set_comment(addr, text)
-            self.stats["comments"] += 1
+            if self.sink.set_comment(addr, text) is not False:
+                self.stats["comments"] += 1
 
     def _apply_string(self, literal):
         """Declare one string constant as the record it is.

@@ -1887,19 +1887,18 @@ def _wide_units(data):
     return bytes(l if h else 0 for l, h in zip(low, high))
 
 
-#: What an unreadable byte is filled with.  Both scans want one whole buffer
-#: per range -- a run has to be maximal, which it cannot be if a chunk
-#: boundary can end it -- and a section's virtual size routinely exceeds the
-#: bytes actually in the file.  0xFF is the fill because it is text under
-#: neither rule: not ASCII, so neither a narrow body byte nor the low byte of
-#: a code unit, and never the zero high byte a unit needs.  So a gap stops a
-#: run instead of joining two, and no run is invented out of bytes that are
-#: not there.
+#: What an unreadable byte is filled with. A section's virtual size routinely
+#: exceeds the bytes actually in the file. 0xFF is text under neither rule,
+#: so a gap stops a run instead of joining two and cannot invent a literal.
 _UNREADABLE = 0xFF
 
 
 def _range_bytes(r, start, end):
-    """The bytes of [start, end), with anything unreadable filled opaque."""
+    """The bounded bytes of [start, end), unreadable bytes filled opaque.
+
+    Callers keep their windows small. Reads are still split here so a custom
+    Reader cannot turn one scanner window into an unexpectedly large request.
+    """
     data = bytearray()
     for base in range(start, end, _CHUNK):
         want = min(_CHUNK, end - base)
@@ -1910,7 +1909,7 @@ def _range_bytes(r, start, end):
     return bytes(data)
 
 
-def _runs(classified, min_chars, text, nul):
+def _runs(classified, min_chars, text, nul, max_chars=None):
     """Yield (element index, element count) for every maximal run of `text`
     at least `min_chars` long that ends at a `nul`.
 
@@ -1919,7 +1918,9 @@ def _runs(classified, min_chars, text, nul):
     element earlier would have succeeded and consumed this one.  Starting
     mid-run would declare a literal's tail as a literal of its own.
     """
-    pattern = re.compile(b"[%s]{%d,}%s" % (text, min_chars, nul))
+    count = (b"{%d,}" % min_chars if max_chars is None
+             else b"{%d,%d}" % (min_chars, max_chars))
+    pattern = re.compile(b"[%s]%s%s" % (text, count, nul))
     for m in pattern.finditer(classified):
         yield m.start(), m.end() - m.start() - 1
 
@@ -1942,31 +1943,45 @@ def headerless_candidates(r, start, end, wide=False,
     starting mid-instruction is the case the reference gate cannot rule out
     on its own, an immediate operand being free to point anywhere.
     """
-    data = _range_bytes(r, start, end)
     elem = 2 if wide else 1
-    if wide:
-        # The unit stream has to start where the units do. A section start is
-        # page aligned in every PE, so this never actually skips anything;
-        # it is here so a caller passing an odd range cannot silently shift
-        # every unit by a byte.
-        skew = start % 2
-        base, classified = start + skew, _wide_units(data[skew:])
-        text, nul = b"\\x%02x" % _UNIT_TEXT, b"\\x%02x" % _UNIT_NUL
-    else:
-        base, classified = start, data
-        text, nul = _TEXT_CLASS, b"\\x00"
     valid = is_wide_string_text if wide else is_headerless_text
-    for index, length in _runs(classified, min_chars, text, nul):
-        addr = base + index * elem
-        if addr % align:
-            continue
-        raw = bytes(data[addr - start:addr - start + length * elem])
-        # The wide classification accepts a lone surrogate, which decodes as
-        # nothing; the narrow class cannot fail here, and is checked anyway so
-        # that the two paths answer to the same predicate.
-        if not valid(raw):
-            continue
-        yield CharArrayLiteral(addr, length, raw, elem)
+    # Header-less constants have no encoded length to cap a corrupt record.
+    # Use the same generous ceiling as header-bearing literals. Each core
+    # block gets one element of look-behind (to prove maximality) and enough
+    # look-ahead to see the longest permitted body and its terminator.
+    for core in range(start, end, _CHUNK):
+        core_end = min(core + _CHUNK, end)
+        window_start = max(start, core - elem)
+        window_end = min(end, core_end + MAX_STRING_LENGTH * elem + elem)
+        data = _range_bytes(r, window_start, window_end)
+        if wide:
+            skew = window_start % 2
+            base = window_start + skew
+            classified = _wide_units(data[skew:])
+            text, nul = b"\\x%02x" % _UNIT_TEXT, b"\\x%02x" % _UNIT_NUL
+        else:
+            base, classified = window_start, data
+            text, nul = _TEXT_CLASS, b"\\x00"
+        for index, length in _runs(classified, min_chars, text, nul,
+                                   MAX_STRING_LENGTH):
+            # A bounded regex could otherwise accept the tail of an overlong
+            # run. The look-behind makes that distinguishable from a real
+            # maximal run beginning in this block.
+            if index:
+                previous_is_text = (
+                    classified[index - 1] == _UNIT_TEXT if wide else
+                    is_headerless_text_byte(classified[index - 1]))
+                if previous_is_text:
+                    continue
+            addr = base + index * elem
+            if not (core <= addr < core_end) or addr % align:
+                continue
+            raw_start = addr - window_start
+            raw = bytes(data[raw_start:raw_start + length * elem])
+            # The wide classification accepts a lone surrogate, which decodes
+            # as nothing; keep the final predicate for both widths.
+            if valid(raw):
+                yield CharArrayLiteral(addr, length, raw, elem)
 
 
 def pointer_targets(r, ranges, targets):
@@ -1985,14 +2000,19 @@ def pointer_targets(r, ranges, targets):
     if not want:
         return found
     for start, end in ranges:
-        data = _range_bytes(r, start, end)
-        view = memoryview(data)
-        for phase in range(4):
-            count = (len(data) - phase) // 4
-            if count <= 0:
-                continue
-            found |= want.intersection(
-                view[phase:phase + 4 * count].cast("I"))
+        carry = b""
+        for base in range(start, end, _CHUNK):
+            stop = min(base + _CHUNK, end)
+            chunk = _range_bytes(r, base, stop)
+            data = carry + chunk
+            view = memoryview(data)
+            for phase in range(4):
+                count = (len(data) - phase) // 4
+                if count <= 0:
+                    continue
+                found |= want.intersection(
+                    view[phase:phase + 4 * count].cast("I"))
+            carry = data[-3:]
     return found
 
 

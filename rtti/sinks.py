@@ -39,7 +39,7 @@ class Sink(object):
         raise NotImplementedError
 
     def set_comment(self, addr, text):
-        pass
+        return False
 
     def finish(self):
         """Deferred work that cannot run inline."""
@@ -65,6 +65,7 @@ class ViewSink(Sink):
 
     def set_comment(self, addr, text):
         self.bv.set_comment_at(addr, text)
+        return True
 
     def add_function(self, addr, name, self_type=None, register_cc=True):
         bv = self.bv
@@ -135,7 +136,13 @@ class AutoSink(Sink):
         self.bv.define_data_var(addr, ty, name)
 
     def set_comment(self, addr, text):
+        # Binary Ninja exposes comments as user state even when an analysis
+        # workflow supplied the text. With no auto/user provenance bit to
+        # consult, the only safe automatic policy is write-on-empty.
+        if self.bv.get_comment_at(addr):
+            return False
         self.bv.set_comment_at(addr, text)
+        return True
 
     def add_function(self, addr, name, self_type=None, register_cc=True):
         bv = self.bv
