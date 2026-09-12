@@ -1001,6 +1001,13 @@ def _attrdata_end(r, addr):
     n = r.u16(addr)
     if n is None or not (2 <= n <= MAX_ATTR_DATA):
         return None
+    # Len includes the leading Word, but reading that Word only proves the
+    # start of the blob exists.  Without checking the declared extent, two
+    # bytes at the end of a truncated method entry can make the entry appear
+    # complete and let its untrusted Len claim unmapped bytes as metadata.
+    # The cap above keeps this validation read small and predictable.
+    if len(r.bytes(addr, n)) != n:
+        return None
     return addr + n
 
 
@@ -1186,8 +1193,10 @@ def _parse_init_table(r, v):
     size = v.instance_size or 0
     for head in (0, 2):
         base = q + head
+        rec_size = r.u32(base)
         count = r.u32(base + 4)
-        if count is None or not (0 < count <= MAX_MANAGED_FIELDS):
+        if (rec_size is None or count is None or
+                not (0 < count <= MAX_MANAGED_FIELDS)):
             continue
         fields = _managed_fields(r, base + 8, count, size, ptr)
         if fields is None:
@@ -1195,7 +1204,7 @@ def _parse_init_table(r, v):
         v.managed.extend(fields)
         end = base + 8 + count * 2 * ptr
         v.init_table = {"addr": p, "count": count, "entries": base + 8,
-                        "rec_size": r.u32(base), "end": end}
+                        "rec_size": rec_size, "end": end}
         # The whole record, kind byte to last entry. Nothing else claims it --
         # these tables have no PPTypeInfo cell in front of them, so the
         # TypeInfo scan never sees one, and all 9,293 in the corpus are bytes
@@ -1215,12 +1224,19 @@ def _parse_method_table(r, v):
     if count is None or count > 4096:
         return
     p += 2
+    methods = []
     for _ in range(count):
         m = parse_method_entry(r, p)
-        if m is None:
+        # Len is part of the entry's proof, not a distance to trust before the
+        # rest of the record corroborates it.  Stage every entry so a bad one
+        # cannot leave earlier names behind, or grow MethodTable's region to
+        # an address computed from unrelated bytes.
+        if (m is None or not m["complete"] or not m["addr"] or
+                not r.is_code(m["addr"])):
             return
-        v.methods.append(m)
-        p += m["size"]
+        methods.append(m)
+        p = m["end"]
+    v.methods.extend(methods)
     v.regions.append((start, p, "MethodTable"))
     _parse_method_table_ex(r, v, p)
 
@@ -1274,11 +1290,14 @@ def _parse_method_table_ex(r, v, p):
         if not entry or flags is None or not r.is_mapped(entry):
             return
         m = parse_method_entry(r, entry)
-        if m is None or not m["complete"] or not r.is_code(m["addr"]):
+        if (m is None or not m["complete"] or not m["addr"] or
+                not r.is_code(m["addr"])):
             return
         m["flags"] = flags
         m["method_kind"] = flags & METHOD_KIND_MASK
         m["virtual_index"] = r.i16(q + ptr + 2)
+        if m["virtual_index"] is None:
+            return
         m["virtual"] = bool(flags & FLAG_VIRTUAL)
         m["dynamic"] = bool(flags & FLAG_DYNAMIC)
         m["abstract"] = bool(flags & FLAG_ABSTRACT)
@@ -1309,6 +1328,8 @@ def _parse_dynamic_table(r, v):
     if count is None or count > 4096:
         return
     ids = [r.i16(p + 2 + 2 * i) for i in range(count)]
+    if any(mid is None for mid in ids):
+        return
     base = p + 2 + 2 * count
     entries = []
     for i, mid in enumerate(ids):
@@ -1340,25 +1361,30 @@ def _parse_field_table(r, v):
     start = p
     count = r.u16(p)
     ctab = r.u32(p + 2)
-    if count is None or count > 4096:
+    if count is None or ctab is None or count > 4096:
         return
     p += 6
+    fields = []
     for _ in range(count):
         off = r.u32(p)
         idx = r.u16(p + 4)
         name, p2 = r.shortstr(p + 6)
-        if not is_identifier(name):
+        if off is None or idx is None or not is_identifier(name):
             return
-        v.fields.append({"offset": off, "class_index": idx, "name": name,
-                         "entry": p})
+        fields.append({"offset": off, "class_index": idx, "name": name,
+                       "entry": p})
         p = p2
+    v.fields.extend(fields)
     v.regions.append((start, p, "FieldTable"))
 
     if ctab and r.is_mapped(ctab):
         n = r.u16(ctab)
         if n is not None and n <= 4096:
-            v.field_classes = [r.u32(ctab + 2 + 4 * i) for i in range(n)]
-            v.regions.append((ctab, ctab + 2 + 4 * n, "FieldClassTable"))
+            classes = [r.u32(ctab + 2 + 4 * i) for i in range(n)]
+            if all(cls is not None for cls in classes):
+                v.field_classes = classes
+                v.regions.append((ctab, ctab + 2 + 4 * n,
+                                  "FieldClassTable"))
 
 
 def _parse_intf_table(r, v):
@@ -1369,12 +1395,18 @@ def _parse_intf_table(r, v):
     count = r.i32(p)
     if count is None or not (0 < count <= 1024):
         return
+    entries = []
     for i in range(count):
         e = p + 4 + 28 * i
-        v.interfaces.append({
-            "guid": _guid(r.bytes(e, 16)), "vtable": r.u32(e + 16),
-            "offset": r.i32(e + 20), "getter": r.u32(e + 24), "entry": e,
-            "slots": 0})
+        guid = _guid(r.bytes(e, 16))
+        vtable = r.u32(e + 16)
+        offset = r.i32(e + 20)
+        getter = r.u32(e + 24)
+        if guid is None or vtable is None or offset is None or getter is None:
+            return
+        entries.append({"guid": guid, "vtable": vtable, "offset": offset,
+                        "getter": getter, "entry": e, "slots": 0})
+    v.interfaces.extend(entries)
     v.regions.append((p, p + 4 + 28 * count, "IntfTable"))
 
     # Each entry points at a vtable of thunk addresses.  That array is data,
