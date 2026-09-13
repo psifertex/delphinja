@@ -1,5 +1,5 @@
-"""Where recovered metadata reaches Binary Ninja.
+"""Where recovered metadata and external symbols reach Binary Ninja.
 
-Two mechanisms over the same decoder -- a module workflow and a
-DebugInfoParser -- plus registration of the bundled WARP signatures.
+Two mechanisms over the RTTI decoder -- a module workflow and a
+DebugInfoParser -- plus a MAP DebugInfoParser and the bundled WARP signatures.
 """

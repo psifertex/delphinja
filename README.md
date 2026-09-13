@@ -13,6 +13,9 @@ Binary Ninja workflow for Delphi and the Visual Component Library (VCL). Include
   strips the symbols from. These ship with the plugin and are loaded when a
   Delphi binary is recognised, so nothing has to be copied into a signature
   directory.
+- **Detailed MAP files** contribute value-sorted public symbols through Binary
+  Ninja's external debug-info path, with rebasing-safe section mapping and
+  bounded parsing.
 Delphi 2 through 13 are supported, and Free Pascal 2.6 through 3.2. Delphi
 metadata recovery currently targets Win32; Free Pascal runtime signatures
 cover both Win32 and Win64 when an FPC version marker is present. The VMT
@@ -55,6 +58,10 @@ Further reading:
 - [tools/README.md](tools/README.md) -- how the shipped signature libraries are built.
 - [docs/DFM.md](docs/DFM.md) -- the compiled form stream format, and how event
   handlers are bound to the controls that raise them.
+- [docs/MAP.md](docs/MAP.md) -- supported MAP records, address mapping, safety
+  policy, and fixture provenance.
+- [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md) -- roadmap for JDBG, TDS, BPL,
+  DCU/DCP, and Win64 RSM research.
 
 ## Tests
 
@@ -90,7 +97,7 @@ supply the matching Binary Ninja package and bundled standard library.
 
 ## How it runs
 
-The plugin registers three things:
+The plugin registers four things:
 
 **One decoder, two delivery mechanisms**, chosen by the `delphinja.mechanism`
 setting. It is read at plugin load, so changes require a restart. Both apply
@@ -112,6 +119,12 @@ names. It cannot remove functions or set comments; neither has an entry point in
 demanglers but nothing for Borland, so `@Classes@TReader@ReadIdent$qqrv` passed
 through untouched. Needed for any symbol source that carries Borland mangling
 (package exports, DCUs); the RTTI path produces demangled names already.
+
+**A Delphi MAP debug-info parser** — selected when a detailed text MAP is
+supplied as external debug information. It contributes unambiguous publics in
+executable sections and never replaces user symbols. Source-line records are
+retained, but the currently used Binary Ninja debug-info API has no line-table
+contribution method.
 
 **Plugin commands** — for everything the debug info API cannot express, and for
 repairing databases analysed before the parser existed:

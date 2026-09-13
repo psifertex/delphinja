@@ -27,6 +27,7 @@ from binaryninja.interaction import (get_choice_input, get_save_filename_input,
 
 from . import demangler as D
 from .integration import debuginfo as DI
+from .integration import mapfile as MAP
 from .integration import signatures as SIG
 from .integration import workflow as WF
 from .rtti import apply as A
@@ -224,6 +225,10 @@ for _key, _title, _desc in (
 # code or moving files.
 if _SETTINGS.get_bool("delphinja.demangler"):
     D.register()
+
+# External MAP files are explicit user input and are independent of the RTTI
+# delivery mechanism chosen below.
+MAP.register()
 
 # One decoder, two delivery mechanisms. Both drive the same parser, scanner
 # and type construction through sinks; they differ only in where the results
