@@ -22,6 +22,7 @@ half a better vantage point than a single pass would have:
       removals made earlier than this point are silently undone
 """
 
+import bisect
 import json
 
 import binaryninja as bn
@@ -40,6 +41,21 @@ TAG = A.TAG
 # Eligibility runs on every matching load, so it must not become a full scan.
 PROBE_LIMIT = 0x40000
 RECOVERY_PLATFORMS = ["windows-x86", "windows-x86_64"]
+
+# Callback discovery is a late convenience pass, not another whole-program
+# analysis engine.  Code references let it visit only calls to typed callback
+# consumers, and these caps keep even adversarial binaries from making the
+# workflow activity unbounded.
+CALLBACK_FUNCTION_LIMIT = 100000
+CALLBACK_REFS_PER_FUNCTION = 4096
+CALLBACK_REFERENCE_LIMIT = 100000
+CALLBACK_TARGET_LIMIT = 4096
+CALLBACK_TYPE_DEPTH = 16
+
+_CONSTANT_VALUES = {
+    bn.RegisterValueType.ConstantValue,
+    bn.RegisterValueType.ConstantPointerValue,
+}
 
 
 def probe(bv):
@@ -84,6 +100,199 @@ def _eligible(activity, context):
         return bv is not None and probe(bv)
     except Exception:
         return False
+
+
+def _known_constant(value):
+    """Return a RegisterValue's single known constant, if it has one."""
+    try:
+        if value.type in _CONSTANT_VALUES:
+            return value.value
+    except (AttributeError, ValueError):
+        pass
+    return None
+
+
+def _resolve_named_type(bv, ty):
+    """Peel a bounded chain of named typedefs, rejecting cycles."""
+    seen = set()
+    for _depth in range(CALLBACK_TYPE_DEPTH):
+        try:
+            if ty.type_class != bn.TypeClass.NamedTypeReferenceClass:
+                return ty
+            type_id = ty.type_id
+        except (AttributeError, ValueError):
+            return None
+        if type_id in seen:
+            return None
+        seen.add(type_id)
+        try:
+            ty = bv.get_type_by_id(type_id)
+        except (AttributeError, ValueError):
+            return None
+        if ty is None:
+            return None
+    return None
+
+
+def _callback_parameter_indexes(bv, function_type):
+    """Indexes of plain function-pointer parameters in a function type.
+
+    Delphi ``of object`` method values are deliberately outside this shape:
+    they are a code pointer plus a Self pointer, not a plain pointer to a
+    function, and need different data-flow handling.
+    """
+    result = []
+    try:
+        parameters = function_type.parameters
+    except (AttributeError, ValueError):
+        return result
+    for index, parameter in enumerate(parameters):
+        try:
+            ty = _resolve_named_type(bv, parameter.type)
+            if ty is None:
+                continue
+            if ty.type_class != bn.TypeClass.PointerTypeClass:
+                continue
+            target = _resolve_named_type(bv, ty.target)
+            if (target is not None and
+                    target.type_class == bn.TypeClass.FunctionTypeClass):
+                result.append(index)
+        except (AttributeError, ValueError):
+            continue
+    return result
+
+
+def _merged_spans(spans):
+    """Sorted, non-overlapping metadata ranges for fast target rejection."""
+    merged = []
+    for start, end in sorted(spans):
+        if end <= start:
+            continue
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _in_spans(addr, spans, starts):
+    index = bisect.bisect_right(starts, addr) - 1
+    return index >= 0 and addr < spans[index][1]
+
+
+def _analysis_aborted(bv):
+    try:
+        aborted = bv.analysis_is_aborted
+        return (aborted() if callable(aborted) else aborted) is True
+    except Exception:
+        return False
+
+
+def _inside_user_function(bv, addr):
+    """Whether a containing function carries explicit analyst state."""
+    try:
+        containing = bv.get_functions_containing(addr)
+    except Exception:
+        return True
+    for function in containing:
+        try:
+            annotations = function.has_user_annotations
+            annotations = annotations() if callable(annotations) else annotations
+            if annotations:
+                return True
+        except Exception:
+            return True
+    return False
+
+
+def discover_callbacks(bv, metadata_spans=()):
+    """Create auto functions for constant, executable callback arguments.
+
+    This consumes the function-pointer types already attached to callees by
+    WARP, imports, or the analyst.  It intentionally handles direct calls
+    only: a code reference proves which function type belongs to the call,
+    while guessing an indirect destination would undermine the conservative
+    target checks below.
+    """
+    spans = _merged_spans(metadata_spans)
+    starts = [start for start, _end in spans]
+    candidates = set()
+    references = 0
+
+    for function_index, callee in enumerate(bv.functions):
+        if function_index >= CALLBACK_FUNCTION_LIMIT:
+            break
+        if _analysis_aborted(bv):
+            return 0
+        try:
+            function_type = callee.type
+        except (AttributeError, ValueError):
+            continue
+        indexes = _callback_parameter_indexes(bv, function_type)
+        if not indexes:
+            continue
+        remaining = CALLBACK_REFERENCE_LIMIT - references
+        if remaining <= 0:
+            break
+        maximum = min(CALLBACK_REFS_PER_FUNCTION, remaining)
+        for ref in bv.get_code_refs(callee.start, max_items=maximum):
+            references += 1
+            if _analysis_aborted(bv):
+                return 0
+            try:
+                if (ref.function is None or
+                        not isinstance(ref.llil, bn.Call) or
+                        callee.start not in bv.get_callees(
+                            ref.address, ref.function, ref.arch)):
+                    continue
+            except (AttributeError, ValueError):
+                continue
+            for index in indexes:
+                try:
+                    value = ref.function.get_parameter_at(
+                        ref.address, function_type, index, ref.arch)
+                except (AttributeError, ValueError):
+                    continue
+                target = _known_constant(value)
+                if (target is None or target in candidates or
+                        not bv.is_valid_offset(target) or
+                        not bv.is_offset_executable(target) or
+                        _in_spans(target, spans, starts) or
+                        bv.get_function_at(target) is not None or
+                        _inside_user_function(bv, target)):
+                    continue
+                candidates.add(target)
+                if len(candidates) >= CALLBACK_TARGET_LIMIT:
+                    break
+            if len(candidates) >= CALLBACK_TARGET_LIMIT:
+                break
+        if (references >= CALLBACK_REFERENCE_LIMIT or
+                len(candidates) >= CALLBACK_TARGET_LIMIT):
+            break
+
+    if _analysis_aborted(bv):
+        return 0
+
+    # add_function creates analysis-owned state.  Do not use
+    # auto_discovered=True here: deleteUnusedAutoFunctions can discard such
+    # functions, and the callback pass itself runs immediately after it.
+    created = []
+    for target in sorted(candidates):
+        if _analysis_aborted(bv):
+            for function in reversed(created):
+                bv.remove_function(function)
+            return 0
+        if (bv.get_function_at(target) is not None or
+                _inside_user_function(bv, target)):
+            continue
+        function = bv.add_function(target)
+        if function is not None:
+            created.append(function)
+    if _analysis_aborted(bv):
+        for function in reversed(created):
+            bv.remove_function(function)
+        return 0
+    return len(created)
 
 
 def _recover(context):
@@ -145,10 +354,12 @@ def _cleanup(context):
                 continue
             if method_cc is not None:
                 conventions += 1
+        callbacks = discover_callbacks(bv, spans)
         state.clear()
         bn.log_info("removed %d functions over metadata, set the register "
-                    "convention on %d methods, typed %d Self parameters"
-                    % (len(removed), conventions, typed), TAG)
+                    "convention on %d methods, typed %d Self parameters, "
+                    "created %d callback functions"
+                    % (len(removed), conventions, typed, callbacks), TAG)
     except Exception as exc:
         bn.log_error("cleanup failed: %s" % exc, TAG)
 
