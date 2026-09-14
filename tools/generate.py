@@ -99,7 +99,7 @@ def _configure_view(bv, kb, units, layout, log, started):
         bv.create_tag_type(SELECTED_TAG, "\u2713")
     except Exception:
         pass
-    tmap = dtypes.TypeMap(bv)
+    tmap = dtypes.TypeMap(bv, kb=kb)
     index = dclasses.ClassIndex(kb, tmap)
     defined = index.define_all(bv)
     log("defined %d class layouts from the knowledge base" % defined)
