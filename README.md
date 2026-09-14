@@ -103,14 +103,16 @@ The plugin registers four things:
 setting. It is read at plugin load, so changes require a restart. Both apply
 the same data just in different ways.
 
-- `workflow` (default) — two activities spliced into
-`core.module.metaAnalysis`. The first runs immediately before
-`core.module.extendedAnalysis`, which is where linear sweep lives: defining the
-metadata as data first minimizes bogus function creation. The second runs after
-`core.module.deleteUnusedAutoFunctions`, removing whatever still overlaps, and
-types `Self`. Both jobs need that late position — parameter variables do not
-exist until functions are analysed, and a removal made any earlier is silently
-undone.
+- `workflow` (default) — four activities spliced into
+`core.module.metaAnalysis`. Before `core.module.extendedAnalysis`, which is
+where linear sweep lives, the first defines metadata as data, an early WARP
+pass types the functions already known, and a callback pass creates the typed
+callback entries already visible. Those entries constrain the sweep instead
+of repairing its boundaries later. After the normal post-sweep WARP matcher,
+the final activity removes any remaining metadata overlaps, types `Self`, and
+runs callback discovery again for callers the sweep itself found. Parameter
+variables and those late callers do not exist until their functions are
+analysed, and a metadata removal made earlier is silently undone.
 - `debugInfo` — a `DebugInfoParser` contributing types, data variables and
 names. It cannot remove functions or set comments; neither has an entry point in the debug info API.
 - `off` — nothing automatic; the registered commands still work.

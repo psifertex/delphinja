@@ -8,18 +8,24 @@ existing, and removing the rest afterwards needs an API the debug info path does
 not have.  Measured on a Delphi 7 sample: 107 sweep-created functions over
 metadata with nothing, 2 with the debug info parser, 0 with this.
 
-The work is split across two activities because the analysis pipeline gives each
-half a better vantage point than a single pass would have:
+The work is split across four activities because the analysis pipeline gives
+each stage a better vantage point than a single pass would have:
 
   before core.module.extendedAnalysis   (which is where linear sweep lives)
       scan, define types and data variables, name functions -- early enough to
       pre-empt the sweep, but late enough that entry-point analysis has already
       populated bv.functions
 
+      run an early WARP match, wait for its downstream analysis update, then
+      create the callback functions whose typed consumers and callers already
+      exist -- these boundaries keep linear sweep from walking across the real
+      entries
+
   after core.module.deleteUnusedAutoFunctions   (inside core.module.finishUpdate)
       remove whatever still overlaps metadata, and type Self -- parameter
       variables do not exist until the functions have been analysed, and
-      removals made earlier than this point are silently undone
+      removals made earlier than this point are silently undone. Run callback
+      discovery again for consumers or callers that linear sweep itself found.
 """
 
 import bisect
@@ -34,6 +40,8 @@ from ..rtti import sinks
 from . import signatures
 
 ACTIVITY = "analysis.plugins.delphinja"
+EARLY_MATCHER = "analysis.plugins.delphinjaEarlyWarp"
+EARLY_CALLBACKS = "analysis.plugins.delphinjaEarlyCallbacks"
 CLEANUP = "analysis.plugins.delphinjaCleanup"
 TAG = A.TAG
 
@@ -42,9 +50,9 @@ TAG = A.TAG
 PROBE_LIMIT = 0x40000
 RECOVERY_PLATFORMS = ["windows-x86", "windows-x86_64"]
 
-# Callback discovery is a late convenience pass, not another whole-program
-# analysis engine.  Code references let it visit only calls to typed callback
-# consumers, and these caps keep even adversarial binaries from making the
+# Callback discovery is a bounded convenience pass, not another whole-program
+# analysis engine. Code references let it visit only calls to typed callback
+# consumers, and these caps keep even adversarial binaries from making either
 # workflow activity unbounded.
 CALLBACK_FUNCTION_LIMIT = 100000
 CALLBACK_REFS_PER_FUNCTION = 4096
@@ -330,6 +338,43 @@ def _recover(context):
         bn.log_error("recovery failed: %s" % exc, TAG)
 
 
+def _early_match(context):
+    """Match functions known before linear sweep against the registered WARP.
+
+    Matching and consuming its types must be separate activities. WARP's
+    downstream analysis update commits the matched function types before the
+    callback pass asks callers for parameter values.
+    """
+    bv = context.view
+    if _state(bv).get("md") is None or _analysis_aborted(bv):
+        return
+    try:
+        # WARP is a separately toggleable core plugin and may not be
+        # importable at all. Keep that optional dependency off this module's
+        # import path, as signature registration does.
+        from binaryninja import warp
+        warp.run_matcher(bv)
+    except Exception as exc:
+        # The ordinary post-sweep matcher remains in the workflow, so an early
+        # failure is recoverable and should not prevent metadata cleanup.
+        bn.log_error("early WARP matching failed: %s" % exc, TAG)
+
+
+def _early_callbacks(context):
+    """Create callback entries known early enough to constrain linear sweep."""
+    bv = context.view
+    state = _state(bv)
+    md = state.get("md")
+    if md is None:
+        return
+    try:
+        spans = [(s, e) for s, e, _ in md.spans()]
+        state["early_callbacks"] = discover_callbacks(bv, spans)
+    except Exception as exc:
+        # Cleanup performs the same discovery after the normal WARP pass, so
+        # keep the workflow usable even if the opportunistic early pass fails.
+        bn.log_error("early callback discovery failed: %s" % exc, TAG)
+
 
 def _cleanup(context):
     bv = context.view
@@ -354,12 +399,14 @@ def _cleanup(context):
                 continue
             if method_cc is not None:
                 conventions += 1
-        callbacks = discover_callbacks(bv, spans)
+        early_callbacks = state.get("early_callbacks", 0)
+        late_callbacks = discover_callbacks(bv, spans)
         state.clear()
         bn.log_info("removed %d functions over metadata, set the register "
                     "convention on %d methods, typed %d Self parameters, "
-                    "created %d callback functions"
-                    % (len(removed), conventions, typed, callbacks), TAG)
+                    "created %d callback functions before sweep and %d after"
+                    % (len(removed), conventions, typed, early_callbacks,
+                       late_callbacks), TAG)
     except Exception as exc:
         bn.log_error("cleanup failed: %s" % exc, TAG)
 
@@ -399,6 +446,48 @@ def register():
 
     workflow.register_activity(Activity(
         configuration=json.dumps({
+            "name": EARLY_MATCHER,
+            "title": "Delphi Early WARP",
+            "role": "action",
+            "description": "Match known Delphi functions before linear sweep.",
+            "eligibility": {
+                "runOnce": True,
+                "auto": {},
+                "predicates": [
+                    {"type": "platform", "value": ["windows-x86"],
+                     "operator": "in"},
+                    {"type": "setting", "identifier": EARLY_MATCHER,
+                     "value": True},
+                    {"type": "setting",
+                     "identifier": "analysis.warp.matcher", "value": True},
+                ],
+            },
+            "dependencies": {"downstream": ["core.module.update"]},
+        }),
+        action=_early_match))
+
+    workflow.register_activity(Activity(
+        configuration=json.dumps({
+            "name": EARLY_CALLBACKS,
+            "title": "Delphi Early Callback Recovery",
+            "role": "action",
+            "description": "Create typed callback entries before linear sweep.",
+            "eligibility": {
+                "runOnce": True,
+                "auto": {},
+                "predicates": [
+                    {"type": "platform", "value": ["windows-x86"],
+                     "operator": "in"},
+                    {"type": "setting", "identifier": EARLY_CALLBACKS,
+                     "value": True},
+                ],
+            },
+            "dependencies": {"downstream": ["core.module.update"]},
+        }),
+        action=_early_callbacks))
+
+    workflow.register_activity(Activity(
+        configuration=json.dumps({
             "name": CLEANUP,
             "title": "Delphi RTTI Cleanup",
             "role": "action",
@@ -424,6 +513,7 @@ def register():
         }),
         action=_cleanup))
 
-    workflow.insert("core.module.extendedAnalysis", [ACTIVITY])
+    workflow.insert("core.module.extendedAnalysis",
+                    [ACTIVITY, EARLY_MATCHER, EARLY_CALLBACKS])
     workflow.insert_after("core.module.deleteUnusedAutoFunctions", [CLEANUP])
     workflow.register()

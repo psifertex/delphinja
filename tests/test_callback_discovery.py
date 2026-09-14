@@ -1,3 +1,4 @@
+import json
 import types
 import unittest
 from unittest import mock
@@ -251,8 +252,79 @@ class CallbackDiscoveryTests(unittest.TestCase):
                          [0x3000])
         self.assertEqual(view.existing, {})
 
+    def test_second_pass_keeps_early_target_and_adds_newly_visible_target(self):
+        from delphinja.integration import workflow
+
+        function_type = _function_type(_callback_type())
+        early_callee = types.SimpleNamespace(start=0x1000, type=function_type)
+        late_callee = types.SimpleNamespace(start=0x1100, type=function_type)
+        early_caller = _Caller([_value(0x3000)])
+        late_duplicate = _Caller([_value(0x3000)])
+        late_new = _Caller([_value(0x3100)])
+        view = _View(
+            [early_callee],
+            {
+                early_callee.start: [
+                    _Reference(early_callee.start, early_caller)],
+                late_callee.start: [
+                    _Reference(late_callee.start, late_duplicate),
+                    _Reference(late_callee.start, late_new, 0x2010),
+                ],
+            },
+            executable={0x3000, 0x3100})
+
+        self.assertEqual(workflow.discover_callbacks(view), 1)
+        view.functions.append(late_callee)
+        self.assertEqual(workflow.discover_callbacks(view), 1)
+        self.assertEqual([address for address, _args, _kwargs in view.added],
+                         [0x3000, 0x3100])
+
 
 class WorkflowPlacementTests(unittest.TestCase):
+    def test_early_match_runs_only_after_recovery_state_exists(self):
+        from delphinja.integration import workflow
+
+        view = types.SimpleNamespace(
+            session_data={}, analysis_is_aborted=False)
+        context = types.SimpleNamespace(view=view)
+        with mock.patch("binaryninja.warp.run_matcher") as matcher:
+            workflow._early_match(context)
+            matcher.assert_not_called()
+
+            view.session_data["delphinja"] = {"md": mock.sentinel.metadata}
+            workflow._early_match(context)
+            matcher.assert_called_once_with(view)
+
+    def test_early_match_failure_does_not_stop_later_workflow_stages(self):
+        from delphinja.integration import workflow
+
+        view = types.SimpleNamespace(
+            session_data={"delphinja": {"md": mock.sentinel.metadata}},
+            analysis_is_aborted=False)
+        context = types.SimpleNamespace(view=view)
+        with mock.patch("binaryninja.warp.run_matcher",
+                        side_effect=RuntimeError("unavailable")), \
+                mock.patch.object(workflow.bn, "log_error") as log_error:
+            workflow._early_match(context)
+
+        log_error.assert_called_once()
+
+    def test_early_callback_pass_records_count_without_discarding_state(self):
+        from delphinja.integration import workflow
+
+        metadata = mock.Mock()
+        metadata.spans.return_value = [(0x4000, 0x4010, "TypeInfo")]
+        state = {"md": metadata, "pending_self": (), "cc": None}
+        view = types.SimpleNamespace(session_data={"delphinja": state})
+        context = types.SimpleNamespace(view=view)
+        with mock.patch.object(workflow, "discover_callbacks",
+                               return_value=3) as discover:
+            workflow._early_callbacks(context)
+
+        discover.assert_called_once_with(view, [(0x4000, 0x4010)])
+        self.assertEqual(state["early_callbacks"], 3)
+        self.assertIs(state["md"], metadata)
+
     def test_cleanup_discovers_callbacks_before_discarding_metadata_state(self):
         from delphinja.integration import workflow
 
@@ -284,6 +356,48 @@ class WorkflowPlacementTests(unittest.TestCase):
 
         registered.insert_after.assert_called_once_with(
             "core.module.deleteUnusedAutoFunctions", [workflow.CLEANUP])
+        registered.insert.assert_called_once_with(
+            "core.module.extendedAnalysis",
+            [workflow.ACTIVITY, workflow.EARLY_MATCHER,
+             workflow.EARLY_CALLBACKS])
+        registered.remove.assert_not_called()
+        registered.replace.assert_not_called()
+
+    def test_early_activities_are_x86_updated_and_honor_warp_switch(self):
+        from delphinja.integration import workflow
+
+        activities = []
+        registered = mock.Mock()
+        registered.register_activity.side_effect = activities.append
+        workflow_factory = mock.Mock()
+        workflow_factory.return_value.clone.return_value = registered
+
+        def activity(**kwargs):
+            return kwargs
+
+        with mock.patch.object(workflow, "Workflow", workflow_factory), \
+                mock.patch.object(workflow, "Activity", side_effect=activity):
+            workflow.register()
+
+        configs = {
+            json.loads(item["configuration"])["name"]:
+            json.loads(item["configuration"])
+            for item in activities
+        }
+        predicates = configs[workflow.EARLY_MATCHER]["eligibility"][
+            "predicates"]
+        self.assertIn({
+            "type": "setting", "identifier": "analysis.warp.matcher",
+            "value": True,
+        }, predicates)
+        for name in (workflow.EARLY_MATCHER, workflow.EARLY_CALLBACKS):
+            config = configs[name]
+            self.assertEqual(config["dependencies"], {
+                "downstream": ["core.module.update"]})
+            self.assertEqual(config["eligibility"]["predicates"][0], {
+                "type": "platform", "value": ["windows-x86"],
+                "operator": "in",
+            })
 
 
 if __name__ == "__main__":
